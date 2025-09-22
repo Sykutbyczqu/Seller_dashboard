@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
+from datetime import date, timedelta
 
 # -----------------------
 # 1. Konfiguracja aplikacji
@@ -35,35 +36,48 @@ def get_metabase_session():
 session_id = get_metabase_session()
 headers = {"X-Metabase-Session": session_id} if session_id else {}
 
+# -----------------------
+# 4. Sekcja wyboru daty w interfejsie użytkownika
+# ---- ZMIANY DLA WYBORU DATY ----
+# -----------------------
+st.sidebar.header("Opcje raportu")
+selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - timedelta(days=1))
+selected_date_str = selected_date.strftime('%Y-%m-%d')
+
 
 # -----------------------
-# 4. Pobieranie danych z karty Metabase (ID 55)
+# 5. Pobieranie danych z karty Metabase (ID 55)
+# ---- ZMIANY DLA WYBORU DATY ----
 # -----------------------
 @st.cache_data(ttl=600)
-def get_packing_data():
+def get_packing_data(date_param):
     """
-    Funkcja pobiera dane o pakowaniu bezpośrednio z karty Metabase o ID 55.
+    Funkcja pobiera dane o pakowaniu, wysyłając parametr daty do karty Metabase.
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
+        url = f"{METABASE_URL}/api/card/{card_id}/query"
 
-        response = requests.post(url, headers=headers, json={"parameters": []})
+        # Ładunek JSON z parametrem daty
+        payload = {
+            "parameters": [
+                {"type": "date/single", "value": date_param, "name": "selected_date"}
+            ]
+        }
+
+        response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
-        # Tworzenie DataFrame z listy obiektów JSON
         if not data:
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
 
-        # Kluczowe sprawdzenie: upewnij się, że kolumny istnieją
         if 'paczki_pracownika' not in df.columns or 'packing_user_login' not in df.columns:
             st.error("❌ Błąd: Dane z Metabase nie zawierają oczekiwanych kolumn.")
             return pd.DataFrame()
 
-        # Zapewnienie, że kolumna z liczbą paczek jest typu numerycznego
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
 
         return df
@@ -75,19 +89,18 @@ def get_packing_data():
         return pd.DataFrame()
 
 
-df = get_packing_data()
+df = get_packing_data(selected_date_str)
 
 # -----------------------
-# 5. Prezentacja danych (KPI i Wykresy)
+# 6. Prezentacja danych (KPI i Wykresy)
+# ---- ZMIANY DLA WYBORU DATY ----
 # -----------------------
-st.header("Raport z ostatniego dnia roboczego")
+st.header(f"Raport z dnia: {selected_date.strftime('%d-%m-%Y')}")
 
 if not df.empty:
     try:
-        # Obliczenia KPI
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
-        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta jest posortowana
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
@@ -96,7 +109,6 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
-        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         fig_packing = px.bar(
@@ -118,4 +130,5 @@ if not df.empty:
     except Exception as e:
         st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
-    st.warning("Brak danych do wyświetlenia 🚧. Upewnij się, że karta Metabase jest poprawnie skonfigurowana.")
+    st.warning(
+        f"Brak danych do wyświetlenia dla dnia {selected_date_str} 🚧. Upewnij się, że karta Metabase jest poprawnie skonfigurowana.")
