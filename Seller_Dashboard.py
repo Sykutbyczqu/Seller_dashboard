@@ -86,8 +86,9 @@ def get_packing_data():
         response.raise_for_status()
         data = response.json()
 
-        # Poprawne odczytanie danych i metadanych
-        if 'data' not in data or 'rows' not in data['data']:
+        # Poprawne odczytanie danych i metadanych z odpowiedzi
+        # Sprawdzanie, czy dane są puste lub mają błędną strukturę
+        if 'data' not in data or 'results_metadata' not in data['data'] or 'rows' not in data['data']:
             return pd.DataFrame()
 
         columns = [col['name'] for col in data['data']['results_metadata']['columns']]
