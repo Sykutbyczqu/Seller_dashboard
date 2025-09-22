@@ -122,6 +122,7 @@ if not df.empty:
             line_width=2,
             line_dash="dash",
             line_color="darkgray",
+            annotation_text="",
             annotation_position="top right"
         )
 
