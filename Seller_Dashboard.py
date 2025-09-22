@@ -56,7 +56,7 @@ def get_packing_data(date_param):
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query"
+        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
 
         # Ładunek JSON z parametrem daty
         payload = {
