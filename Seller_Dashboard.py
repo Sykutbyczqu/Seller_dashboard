@@ -122,7 +122,6 @@ if not df.empty:
             line_width=2,
             line_dash="dash",
             line_color="darkgray",
-            annotation_text="Cel: 300 paczek",
             annotation_position="top right"
         )
 
