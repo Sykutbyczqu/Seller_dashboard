@@ -38,77 +38,52 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 
 
 # -----------------------
-# 4. Sekcja pobierania danych z zapytania SQL, które działa w Metabase
+# 4. Pobieranie danych z karty Metabase (ID 55)
 # -----------------------
 @st.cache_data(ttl=600)
 def get_packing_data():
     """
-    Funkcja pobiera dane o pakowaniu, używając dokładnie tego samego zapytania SQL, które działa w Metabase.
+    Funkcja pobiera dane o pakowaniu bezpośrednio z karty Metabase.
     """
     try:
-        url = f"{METABASE_URL}/api/dataset"
+        card_id = 55  # ID Twojej karty w Metabase
+        url = f"{METABASE_URL}/api/card/{card_id}/query"
 
-        # Używamy dokładnie tego samego zapytania, które działa w Metabase
-        sql_query = """
-        SELECT
-            u.login AS packing_user_login,
-            COUNT(s.name) AS paczki_pracownika
-        FROM
-            sale_order s
-            JOIN res_users u ON s.packing_user = u.id
-        WHERE
-            s.packing_user IS NOT NULL
-            AND s.packing_date >= (cast(NOW() as date) - INTERVAL '1 day') + INTERVAL '18 hours'
-            AND s.packing_date < current_date + INTERVAL '18 hours'
-        GROUP BY
-            u.login
-        ORDER BY
-            paczki_pracownika DESC
-        """
-
-        payload = {
-            "database": 1,  # PAMIĘTAJ: ZMIEŃ NA POPRAWNY ID BAZY DANYCH
-            "type": "native",
-            "native": {
-                "query": sql_query
-            }
-        }
-
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json={"parameters": []})
         response.raise_for_status()
         data = response.json()
 
-        if 'data' not in data or 'results_metadata' not in data['data'] or 'rows' not in data['data']:
+        # Tworzenie DataFrame z listy obiektów JSON
+        if not data:
             return pd.DataFrame()
 
-        columns = [col['name'] for col in data['data']['results_metadata']['columns']]
-        rows = data['data']['rows']
-
-        df = pd.DataFrame(rows, columns=columns)
+        df = pd.DataFrame(data)
+        # Zapewnienie, że kolumna z liczbą paczek jest typu numerycznego
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
 
         return df
     except requests.exceptions.HTTPError as err:
-        st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL, ID bazy danych i dane logowania są poprawne.")
+        st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL Metabase i dane logowania są poprawne.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Błąd pobierania danych: {e}")
         return pd.DataFrame()
 
 
-# Wywołujemy funkcję bez parametru daty
 df = get_packing_data()
 
 # -----------------------
 # 5. Prezentacja danych (KPI i Wykresy)
 # -----------------------
-# Nagłówek statyczny, ponieważ data jest stała w zapytaniu
-st.header("Raport z ostatniego dnia roboczego (18:00 - 18:00)")
+# Nagłówek statyczny, ponieważ zapytanie SQL na karcie ma stałe daty
+st.header("Raport z ostatniego dnia roboczego")
 
 if not df.empty:
     try:
+        # Obliczenia KPI
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
+        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta jest posortowana
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
@@ -117,6 +92,7 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
+        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         fig_packing = px.bar(
@@ -138,4 +114,4 @@ if not df.empty:
     except Exception as e:
         st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
-    st.warning("Brak danych do wyświetlenia 🚧. Sprawdź, czy dane są dostępne dla wybranej daty.")
+    st.warning("Brak danych do wyświetlenia 🚧. Upewnij się, że karta Metabase jest poprawnie skonfigurowana.")
