@@ -90,7 +90,7 @@ if not df.empty:
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
         # Zmień "packing_user_login" na "packing_user_name"
-        top_packer = df.iloc[0]["packing_user_name"]
+        top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
         col1.metric("📦 Łączna liczba paczek", f"{total_packages:,.0f}")
@@ -108,12 +108,12 @@ if not df.empty:
             df_sorted,
             x="paczki_pracownika",
             # Zmień "packing_user_login" na "packing_user_name"
-            y="packing_user_name",
+            y="packing_user_login",
             color="color",
             color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},
             title="Liczba paczek spakowanych przez pracownika",
             # Zmień etykiety, aby były bardziej czytelne
-            labels={"packing_user_name": "Imię i nazwisko pracownika", "paczki_pracownika": "Liczba paczek"},
+            labels={"packing_user_login": "Imię i nazwisko pracownika", "paczki_pracownika": "Liczba paczek"},
             orientation='h'
         )
 
@@ -132,7 +132,7 @@ if not df.empty:
     except KeyError as e:
         # Zaktualizuj komunikat o błędzie, aby odzwierciedlić nową nazwę kolumny
         st.error(
-            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_name' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
+            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
     except IndexError:
         st.warning("Brak danych w DataFrame.")
     except Exception as e:
