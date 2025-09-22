@@ -99,7 +99,7 @@ if not df.empty:
 
         st.subheader("📦 Ranking wydajności pakowania")
 
-        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
+        # Sortowanie dla wykresu
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         # Dodanie warunku do dynamicznej zmiany koloru
@@ -109,13 +109,24 @@ if not df.empty:
         fig_packing = px.bar(
             df_sorted,
             x="paczki_pracownika",
-            y="packing_user_login",
-            color="color",  # Użyj nowej kolumny do kolorowania
-            color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},  # Definicja kolorów
+            y="packing_user_name",  # Zmieniono na nową kolumnę z imieniem i nazwiskiem
+            color="color",
+            color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},
             title="Liczba paczek spakowanych przez pracownika",
-            labels={"packing_user_login": "Login pracownika", "paczki_pracownika": "Liczba paczek"},
+            labels={"packing_user_name": "Imię i nazwisko pracownika", "paczki_pracownika": "Liczba paczek"},
             orientation='h'
         )
+
+        # --- Dodaj pionową kreskę ---
+        fig_packing.add_vline(
+            x=300,
+            line_width=2,
+            line_dash="dash",
+            line_color="darkgray",
+            annotation_text="Cel: 300 paczek",
+            annotation_position="top right"
+        )
+
         fig_packing.update_layout(yaxis={'categoryorder': 'total ascending'})
         st.plotly_chart(fig_packing, use_container_width=True)
 
