@@ -40,13 +40,15 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 # 4. Pobieranie danych z karty Metabase (ID 55)
 # -----------------------
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def get_packing_data():
     """
     Funkcja pobiera dane o pakowaniu bezpośrednio z karty Metabase o ID 55.
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
+        # ZMIEŃ URL: Usuń "/json" na końcu, aby uzyskać prosty format JSON.
+        url = f"{METABASE_URL}/api/card/{card_id}/query"
 
         response = requests.post(url, headers=headers, json={"parameters": []})
         response.raise_for_status()
