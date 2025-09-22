@@ -42,10 +42,10 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 @st.cache_data(ttl=600)
 def get_packing_data():
     """
-    Funkcja pobiera dane o pakowaniu bezpośrednio z karty Metabase.
+    Funkcja pobiera dane o pakowaniu bezpośrednio z karty Metabase o ID 55.
     """
     try:
-        card_id = 55  # ID Twojej karty w Metabase
+        card_id = 55
         url = f"{METABASE_URL}/api/card/{card_id}/query"
 
         response = requests.post(url, headers=headers, json={"parameters": []})
@@ -58,9 +58,9 @@ def get_packing_data():
 
         df = pd.DataFrame(data)
 
-        # Kluczowe sprawdzenie: upewnij się, że kolumna istnieje
-        if 'paczki_pracownika' not in df.columns:
-            st.error("❌ Błąd: Dane z Metabase nie zawierają kolumny 'paczki_pracownika'. Sprawdź konfigurację karty.")
+        # Kluczowe sprawdzenie: upewnij się, że kolumny istnieją
+        if 'paczki_pracownika' not in df.columns or 'packing_user_login' not in df.columns:
+            st.error("❌ Błąd: Dane z Metabase nie zawierają oczekiwanych kolumn.")
             return pd.DataFrame()
 
         # Zapewnienie, że kolumna z liczbą paczek jest typu numerycznego
@@ -71,7 +71,7 @@ def get_packing_data():
         st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL Metabase i dane logowania są poprawne.")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"❌ Błąd pobierania danych: {e}")
+        st.error(f"❌ Wystąpił nieoczekiwany błąd: {e}")
         return pd.DataFrame()
 
 
@@ -80,7 +80,6 @@ df = get_packing_data()
 # -----------------------
 # 5. Prezentacja danych (KPI i Wykresy)
 # -----------------------
-# Nagłówek statyczny, ponieważ zapytanie SQL na karcie ma stałe daty
 st.header("Raport z ostatniego dnia roboczego")
 
 if not df.empty:
@@ -88,6 +87,7 @@ if not df.empty:
         # Obliczenia KPI
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
+        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta jest posortowana
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
@@ -96,6 +96,7 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
+        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         fig_packing = px.bar(
@@ -113,7 +114,7 @@ if not df.empty:
         st.error(
             f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
     except IndexError:
-        st.warning("Brak danych w DataFrame dla wybranej daty.")
+        st.warning("Brak danych w DataFrame.")
     except Exception as e:
         st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
