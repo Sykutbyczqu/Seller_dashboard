@@ -70,7 +70,7 @@ def get_packing_data():
 
         return df
     except requests.exceptions.HTTPError as err:
-        st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL Metabase i dane logowania są poprawne.")
+        st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL Metabase i dane logowania są poprawnee.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Wystąpił nieoczekiwany błąd: {e}")
