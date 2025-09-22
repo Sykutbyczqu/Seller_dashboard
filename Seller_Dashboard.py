@@ -44,18 +44,21 @@ selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - time
 
 
 # -----------------------
-# 5. Pobieranie danych bezpośrednio z zapytania SQL z parametrem
+# 5. Pobieranie danych bezpośrednio z zapytania SQL
 # -----------------------
 @st.cache_data(ttl=600)
 def get_packing_data(selected_date_str):
     """
-    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL z dynamicznym parametrem.
+    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL z dynamicznie wstawianą datą.
     """
     try:
         url = f"{METABASE_URL}/api/dataset"
 
-        # Definicja zapytania SQL z dynamicznym parametrem {{selected_date}}
-        sql_query = """
+        # Daty w formacie YYYY-MM-DD
+        end_date_str = (date.fromisoformat(selected_date_str) + timedelta(days=1)).strftime('%Y-%m-%d')
+
+        # Dynamiczne tworzenie zapytania SQL z wstawionymi datami
+        sql_query = f"""
         SELECT
             u.login AS packing_user_login,
             COUNT(s.name) AS paczki_pracownika
@@ -64,8 +67,8 @@ def get_packing_data(selected_date_str):
             JOIN res_users u ON s.packing_user = u.id
         WHERE
             s.packing_user IS NOT NULL
-            AND s.packing_date >= CAST({{selected_date}} AS date)
-            AND s.packing_date < CAST({{selected_date}} AS date) + INTERVAL '1 day'
+            AND s.packing_date >= '{selected_date_str}'
+            AND s.packing_date < '{end_date_str}'
         GROUP BY
             u.login
         ORDER BY
@@ -76,17 +79,7 @@ def get_packing_data(selected_date_str):
             "database": 1,  # PAMIĘTAJ: ZMIEŃ NA ID TWOJEJ BAZY DANYCH W METABASE
             "type": "native",
             "native": {
-                "query": sql_query,
-                # Dodajemy zmienną, która będzie użyta w zapytaniu
-                "template-tags": {
-                    "selected_date": {
-                        "type": "dimension",
-                        "name": "selected_date",
-                        "display-name": "Wybrana data",
-                        "base-type": "type/DateTime",
-                        "value": selected_date_str
-                    }
-                }
+                "query": sql_query
             }
         }
 
@@ -94,7 +87,6 @@ def get_packing_data(selected_date_str):
         response.raise_for_status()
         data = response.json()
 
-        # Poprawne odczytanie danych i metadanych
         if 'data' not in data or 'results_metadata' not in data['data'] or 'rows' not in data['data']:
             return pd.DataFrame()
 
