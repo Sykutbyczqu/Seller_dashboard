@@ -17,7 +17,6 @@ METABASE_URL = "https://metabase.emamas.ideaerp.pl"
 METABASE_USER = st.secrets["metabase_user"]
 METABASE_PASSWORD = st.secrets["metabase_password"]
 
-
 # -----------------------
 # 3. Logowanie do Metabase
 # -----------------------
@@ -32,7 +31,6 @@ def get_metabase_session():
         st.error(f"❌ Błąd logowania do Metabase: {e}")
         return None
 
-
 session_id = get_metabase_session()
 headers = {"X-Metabase-Session": session_id} if session_id else {}
 
@@ -42,15 +40,13 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 st.sidebar.header("Opcje raportu")
 selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - timedelta(days=1))
 
-
 # -----------------------
 # 5. Pobieranie danych bezpośrednio z zapytania SQL
 # -----------------------
-@st.cache_data(ttl=600)
+# Cache można włączyć po testach
+# @st.cache_data(ttl=600)
 def get_packing_data(selected_date_str):
-    """
-    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL bezpośrednio do API Metabase.
-    """
+    """Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL bezpośrednio do API Metabase."""
     try:
         url = f"{METABASE_URL}/api/dataset"
 
@@ -77,38 +73,33 @@ def get_packing_data(selected_date_str):
         """
 
         payload = {
-            # ZMIEŃ 1 NA ID TWOJEJ BAZY DANYCH W METABASE!
-            # Możesz je znaleźć w URL Metabase, przechodząc do "Admin > Databases > (Twoja Baza)".
-            # URL będzie wyglądał tak: https://metabase.emamas.ideaerp.pl/admin/databases/1
-            "database": 1,
+            "database": 1,  # <-- Zmień na ID Twojej bazy
             "type": "native",
-            "native": {
-                "query": sql_query
-            }
+            "native": {"query": sql_query}
         }
 
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
-        # Poprawne odczytanie danych z odpowiedzi API
-        if 'data' not in data or 'results_metadata' not in data['data'] or 'rows' not in data['data']:
+        # Nowa struktura Metabase: data['data']['columns'] i data['data']['rows']
+        if 'data' not in data or 'columns' not in data['data'] or 'rows' not in data['data']:
             return pd.DataFrame()
 
-        columns = [col['name'] for col in data['data']['results_metadata']['columns']]
+        columns = [col['name'] for col in data['data']['columns']]
         rows = data['data']['rows']
 
         df = pd.DataFrame(rows, columns=columns)
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
 
         return df
+
     except requests.exceptions.HTTPError as err:
         st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL, ID bazy danych i dane logowania są poprawne.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Błąd pobierania danych: {e}")
         return pd.DataFrame()
-
 
 selected_date_str = selected_date.strftime('%Y-%m-%d')
 df = get_packing_data(selected_date_str)
@@ -140,12 +131,11 @@ if not df.empty:
             labels={"packing_user_login": "Login pracownika", "paczki_pracownika": "Liczba paczek"},
             orientation='h'
         )
-        fig_packing.update_layout(yaxis={'categoryorder': 'total ascending'})
+        fig_packing.update_layout(yaxis={'categoryorder':'total ascending'})
         st.plotly_chart(fig_packing, use_container_width=True)
 
     except KeyError as e:
-        st.error(
-            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
+        st.error(f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
     except IndexError:
         st.warning("Brak danych w DataFrame dla wybranej daty.")
     except Exception as e:
