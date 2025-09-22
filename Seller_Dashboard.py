@@ -104,7 +104,7 @@ if not df.empty:
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("📦 Łączna liczba paczek", f"{total_packages:,.0f}")
+        col1.metric("📦 Łączna liczba paczek:", f"{total_packages:,.0f}")
         col2.metric("🧑‍💼 Średnia paczek na pracownika", f"{avg_packages_per_user:,.0f}")
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
