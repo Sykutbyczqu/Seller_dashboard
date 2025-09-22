@@ -98,13 +98,20 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
+
         # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
+
+        # Dodanie warunku do dynamicznej zmiany koloru
+        df_sorted['color'] = df_sorted['paczki_pracownika'].apply(
+            lambda x: 'Więcej niż 300' if x > 300 else '300 lub mniej')
 
         fig_packing = px.bar(
             df_sorted,
             x="paczki_pracownika",
             y="packing_user_login",
+            color="color",  # Użyj nowej kolumny do kolorowania
+            color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},  # Definicja kolorów
             title="Liczba paczek spakowanych przez pracownika",
             labels={"packing_user_login": "Login pracownika", "paczki_pracownika": "Liczba paczek"},
             orientation='h'
