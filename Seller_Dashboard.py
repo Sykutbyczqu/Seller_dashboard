@@ -49,13 +49,14 @@ selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - time
 @st.cache_data(ttl=600)
 def get_packing_data(selected_date_str):
     """
-    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL z dynamicznie wstawianą datą.
+    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL bezpośrednio do API Metabase.
     """
     try:
         url = f"{METABASE_URL}/api/dataset"
 
-        # Daty w formacie YYYY-MM-DD
-        end_date_str = (date.fromisoformat(selected_date_str) + timedelta(days=1)).strftime('%Y-%m-%d')
+        # Konwersja wybranej daty na string w formacie SQL
+        end_date = date.fromisoformat(selected_date_str) + timedelta(days=1)
+        end_date_str = end_date.strftime('%Y-%m-%d')
 
         # Dynamiczne tworzenie zapytania SQL z wstawionymi datami
         sql_query = f"""
@@ -76,7 +77,10 @@ def get_packing_data(selected_date_str):
         """
 
         payload = {
-            "database": 1,  # PAMIĘTAJ: ZMIEŃ NA ID TWOJEJ BAZY DANYCH W METABASE
+            # ZMIEŃ 1 NA ID TWOJEJ BAZY DANYCH W METABASE!
+            # Możesz je znaleźć w URL Metabase, przechodząc do "Admin > Databases > (Twoja Baza)".
+            # URL będzie wyglądał tak: https://metabase.emamas.ideaerp.pl/admin/databases/1
+            "database": 1,
             "type": "native",
             "native": {
                 "query": sql_query
@@ -87,6 +91,7 @@ def get_packing_data(selected_date_str):
         response.raise_for_status()
         data = response.json()
 
+        # Poprawne odczytanie danych z odpowiedzi API
         if 'data' not in data or 'results_metadata' not in data['data'] or 'rows' not in data['data']:
             return pd.DataFrame()
 
@@ -97,12 +102,14 @@ def get_packing_data(selected_date_str):
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
 
         return df
+    except requests.exceptions.HTTPError as err:
+        st.error(f"❌ Błąd HTTP: {err}. Sprawdź, czy URL, ID bazy danych i dane logowania są poprawne.")
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Błąd pobierania danych: {e}")
         return pd.DataFrame()
 
 
-# Konwersja obiektu date na string w wymaganym formacie
 selected_date_str = selected_date.strftime('%Y-%m-%d')
 df = get_packing_data(selected_date_str)
 
