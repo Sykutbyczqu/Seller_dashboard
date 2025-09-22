@@ -84,58 +84,59 @@ df = get_packing_data()
 # -----------------------
 st.header("Raport z ostatniego dnia roboczego")
 
-if not df.empty:
-    try:
-        # Obliczenia KPI
-        total_packages = df["paczki_pracownika"].sum()
-        avg_packages_per_user = df["paczki_pracownika"].mean()
-        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta jest posortowana
-        top_packer = df.iloc[0]["packing_user_login"]
+f
+not df.empty:
+try:
+    # Obliczenia KPI
+    total_packages = df["paczki_pracownika"].sum()
+    avg_packages_per_user = df["paczki_pracownika"].mean()
+    # Zmień "packing_user_login" na "packing_user_name"
+    top_packer = df.iloc[0]["packing_user_name"]
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("📦 Łączna liczba paczek", f"{total_packages:,.0f}")
-        col2.metric("🧑‍💼 Średnia paczek na pracownika", f"{avg_packages_per_user:,.0f}")
-        col3.metric("🏆 Najlepszy pakowacz", top_packer)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📦 Łączna liczba paczek", f"{total_packages:,.0f}")
+    col2.metric("🧑‍💼 Średnia paczek na pracownika", f"{avg_packages_per_user:,.0f}")
+    col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
-        st.subheader("📦 Ranking wydajności pakowania")
+    st.subheader("📦 Ranking wydajności pakowania")
+    df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
-        # Sortowanie dla wykresu
-        df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
+    # Dodanie warunku do dynamicznej zmiany koloru
+    df_sorted['color'] = df_sorted['paczki_pracownika'].apply(
+        lambda x: 'Więcej niż 300' if x > 300 else '300 lub mniej')
 
-        # Dodanie warunku do dynamicznej zmiany koloru
-        df_sorted['color'] = df_sorted['paczki_pracownika'].apply(
-            lambda x: 'Więcej niż 300' if x > 300 else '300 lub mniej')
+    fig_packing = px.bar(
+        df_sorted,
+        x="paczki_pracownika",
+        # Zmień "packing_user_login" na "packing_user_name"
+        y="packing_user_name",
+        color="color",
+        color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},
+        title="Liczba paczek spakowanych przez pracownika",
+        # Zmień etykiety, aby były bardziej czytelne
+        labels={"packing_user_name": "Imię i nazwisko pracownika", "paczki_pracownika": "Liczba paczek"},
+        orientation='h'
+    )
 
-        fig_packing = px.bar(
-            df_sorted,
-            x="paczki_pracownika",
-            y="packing_user_name",  # Zmieniono na nową kolumnę z imieniem i nazwiskiem
-            color="color",
-            color_discrete_map={'Więcej niż 300': 'firebrick', '300 lub mniej': 'cornflowerblue'},
-            title="Liczba paczek spakowanych przez pracownika",
-            labels={"packing_user_name": "Imię i nazwisko pracownika", "paczki_pracownika": "Liczba paczek"},
-            orientation='h'
-        )
+    fig_packing.add_vline(
+        x=300,
+        line_width=2,
+        line_dash="dash",
+        line_color="darkgray",
+        annotation_text="Cel: 300 paczek",
+        annotation_position="top right"
+    )
 
-        # --- Dodaj pionową kreskę ---
-        fig_packing.add_vline(
-            x=300,
-            line_width=2,
-            line_dash="dash",
-            line_color="darkgray",
-            annotation_text="Cel: 300 paczek",
-            annotation_position="top right"
-        )
+    fig_packing.update_layout(yaxis={'categoryorder': 'total ascending'})
+    st.plotly_chart(fig_packing, use_container_width=True)
 
-        fig_packing.update_layout(yaxis={'categoryorder': 'total ascending'})
-        st.plotly_chart(fig_packing, use_container_width=True)
-
-    except KeyError as e:
-        st.error(
-            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
-    except IndexError:
-        st.warning("Brak danych w DataFrame.")
-    except Exception as e:
-        st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
+except KeyError as e:
+    # Zaktualizuj komunikat o błędzie, aby odzwierciedlić nową nazwę kolumny
+    st.error(
+        f"❌ Błąd: Upewnij się, że kolumny 'packing_user_name' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
+except IndexError:
+    st.warning("Brak danych w DataFrame.")
+except Exception as e:
+    st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
     st.warning("Brak danych do wyświetlenia 🚧. Upewnij się, że karta Metabase jest poprawnie skonfigurowana.")
