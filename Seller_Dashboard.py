@@ -14,6 +14,7 @@ st.title("📊 Dashboard wydajności pakowania")
 # 2. Dane logowania do Metabase
 # -----------------------
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
+# Pamiętaj, że dane logowania muszą być w pliku .streamlit/secrets.toml
 METABASE_USER = st.secrets["metabase_user"]
 METABASE_PASSWORD = st.secrets["metabase_password"]
 
@@ -40,6 +41,7 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 # 4. Sekcja wyboru daty w interfejsie użytkownika
 # -----------------------
 st.sidebar.header("Opcje raportu")
+# W tym zapytaniu daty są stałe, ale można je dostosować
 selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - timedelta(days=1))
 
 
@@ -47,7 +49,7 @@ selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - time
 # 5. Pobieranie danych bezpośrednio z zapytania SQL
 # -----------------------
 @st.cache_data(ttl=600)
-def get_packing_data(selected_date_str):
+def get_packing_data():
     """
     Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL bezpośrednio do API Metabase.
     """
@@ -72,26 +74,22 @@ def get_packing_data(selected_date_str):
             paczki_pracownika DESC
         """
 
-        # Tworzenie payloadu dla zapytania
         payload = {
             "database": 1,  # PAMIĘTAJ: ZMIEŃ NA ID TWOJEJ BAZY DANYCH W METABASE
             "type": "native",
             "native": {
-                "query": sql_query,
-                "template-tags": {}  # Tutaj mozesz umiescic zmienne, jesli bedziesz ich uzywac
+                "query": sql_query
             }
         }
 
-        # Wysłanie zapytania
         response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
-        # Sprawdzenie, czy dane są puste
+        # Poprawne odczytanie danych i metadanych
         if 'data' not in data or 'rows' not in data['data']:
             return pd.DataFrame()
 
-        # Użycie "results_metadata" do dynamicznego pobierania nazw kolumn
         columns = [col['name'] for col in data['data']['results_metadata']['columns']]
         rows = data['data']['rows']
 
@@ -104,9 +102,7 @@ def get_packing_data(selected_date_str):
         return pd.DataFrame()
 
 
-# Konwersja obiektu date na string w wymaganym formacie
-selected_date_str = selected_date.strftime('%Y-%m-%d')
-df = get_packing_data(selected_date_str)
+df = get_packing_data()
 
 # -----------------------
 # 6. Prezentacja danych (KPI i Wykresy)
@@ -146,4 +142,4 @@ if not df.empty:
     except Exception as e:
         st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
-    st.warning("Brak danych do wyświetlenia 🚧. Sprawdź, czy dane są dostępne dla wybranej daty.")
+    st.warning("Brak danych do wyświetlenia 🚧. Upewnij się, że dane są dostępne dla wybranej daty.")
