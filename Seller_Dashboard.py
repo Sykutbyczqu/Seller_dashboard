@@ -38,7 +38,6 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 
 # -----------------------
 # 4. Sekcja wyboru daty w interfejsie użytkownika
-# ---- ZMIANY DLA WYBORU DATY ----
 # -----------------------
 st.sidebar.header("Opcje raportu")
 selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - timedelta(days=1))
@@ -47,7 +46,6 @@ selected_date_str = selected_date.strftime('%Y-%m-%d')
 
 # -----------------------
 # 5. Pobieranie danych z karty Metabase (ID 55)
-# ---- ZMIANY DLA WYBORU DATY ----
 # -----------------------
 @st.cache_data(ttl=600)
 def get_packing_data(date_param):
@@ -56,12 +54,13 @@ def get_packing_data(date_param):
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
+        url = f"{METABASE_URL}/api/card/{card_id}/query"
 
-        # Ładunek JSON z parametrem daty
+        # Ładunek JSON z parametrem daty.
+        # Nazwa parametru "selected_date" musi zgadzać się z nazwą zmiennej w Metabase.
         payload = {
             "parameters": [
-                {"type": "date", "value": date_param}
+                {"type": "date/single", "value": date_param, "name": "selected_date"}
             ]
         }
 
@@ -93,7 +92,6 @@ df = get_packing_data(selected_date_str)
 
 # -----------------------
 # 6. Prezentacja danych (KPI i Wykresy)
-# ---- ZMIANY DLA WYBORU DATY ----
 # -----------------------
 st.header(f"Raport z dnia: {selected_date.strftime('%d-%m-%Y')}")
 
@@ -104,7 +102,7 @@ if not df.empty:
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("📦 Łączna liczba paczek:", f"{total_packages:,.0f}")
+        col1.metric("📦 Łączna liczba paczek", f"{total_packages:,.0f}")
         col2.metric("🧑‍💼 Średnia paczek na pracownika", f"{avg_packages_per_user:,.0f}")
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
