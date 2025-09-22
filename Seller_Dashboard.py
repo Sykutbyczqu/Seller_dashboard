@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
-from datetime import date, timedelta
 
 # -----------------------
 # 1. Konfiguracja aplikacji
@@ -58,6 +57,12 @@ def get_packing_data():
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
+
+        # Kluczowe sprawdzenie: upewnij się, że kolumna istnieje
+        if 'paczki_pracownika' not in df.columns:
+            st.error("❌ Błąd: Dane z Metabase nie zawierają kolumny 'paczki_pracownika'. Sprawdź konfigurację karty.")
+            return pd.DataFrame()
+
         # Zapewnienie, że kolumna z liczbą paczek jest typu numerycznego
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
 
@@ -83,7 +88,6 @@ if not df.empty:
         # Obliczenia KPI
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
-        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta jest posortowana
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
@@ -92,7 +96,6 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
-        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         fig_packing = px.bar(
