@@ -46,7 +46,7 @@ def get_packing_data():
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query"
+        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
 
         response = requests.post(url, headers=headers, json={"parameters": []})
         response.raise_for_status()
