@@ -14,7 +14,6 @@ st.title("📊 Dashboard wydajności pakowania")
 # 2. Dane logowania do Metabase
 # -----------------------
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
-# Pamiętaj, że dane logowania muszą być w pliku .streamlit/secrets.toml
 METABASE_USER = st.secrets["metabase_user"]
 METABASE_PASSWORD = st.secrets["metabase_password"]
 
@@ -45,35 +44,63 @@ selected_date = st.sidebar.date_input("Wybierz datę", value=date.today() - time
 
 
 # -----------------------
-# 5. Pobieranie danych z karty Metabase
+# 5. Pobieranie danych bezpośrednio z zapytania SQL
 # -----------------------
 @st.cache_data(ttl=600)
 def get_packing_data(selected_date_str):
     """
-    Funkcja pobiera dane o pakowaniu z karty Metabase,
-    przekazując datę jako parametr zapytania.
+    Funkcja pobiera dane o pakowaniu, wysyłając zapytanie SQL bezpośrednio do API Metabase.
     """
     try:
-        card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query"
+        url = f"{METABASE_URL}/api/dataset"
 
-        # Konwersja daty na string w formacie YYYY-MM-DD
-        parameters = [{"type": "date/single", "value": selected_date_str, "name": "selected_date"}]
+        # Definicja zapytania SQL w kodzie
+        sql_query = """
+        SELECT
+            u.login AS packing_user_login,
+            COUNT(s.name) AS paczki_pracownika
+        FROM
+            sale_order s
+            JOIN res_users u ON s.packing_user = u.id
+        WHERE
+            s.packing_user IS NOT NULL
+            AND s.packing_date >= (cast(NOW() as date) - INTERVAL '1 day')
+            AND s.packing_date < (cast(NOW() as date))
+        GROUP BY
+            u.login
+        ORDER BY
+            paczki_pracownika DESC
+        """
 
-        response = requests.post(url, headers=headers, json={"parameters": parameters})
+        # Tworzenie payloadu dla zapytania
+        payload = {
+            "database": 1,  # PAMIĘTAJ: ZMIEŃ NA ID TWOJEJ BAZY DANYCH W METABASE
+            "type": "native",
+            "native": {
+                "query": sql_query,
+                "template-tags": {}  # Tutaj mozesz umiescic zmienne, jesli bedziesz ich uzywac
+            }
+        }
+
+        # Wysłanie zapytania
+        response = requests.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
 
-        # Tworzenie DataFrame z danych JSON, jak na obrazku
-        if not data:
+        # Sprawdzenie, czy dane są puste
+        if 'data' not in data or 'rows' not in data['data']:
             return pd.DataFrame()
 
-        df = pd.DataFrame(data, columns=["packing_user_login", "paczki_pracownika"])
-        # Konwersja liczby paczek na typ numeryczny
+        # Użycie "results_metadata" do dynamicznego pobierania nazw kolumn
+        columns = [col['name'] for col in data['data']['results_metadata']['columns']]
+        rows = data['data']['rows']
+
+        df = pd.DataFrame(rows, columns=columns)
         df['paczki_pracownika'] = pd.to_numeric(df['paczki_pracownika'])
+
         return df
     except Exception as e:
-        st.error(f"❌ Błąd pobierania danych z Metabase: {e}")
+        st.error(f"❌ Błąd pobierania danych: {e}")
         return pd.DataFrame()
 
 
@@ -90,7 +117,6 @@ if not df.empty:
     try:
         total_packages = df["paczki_pracownika"].sum()
         avg_packages_per_user = df["paczki_pracownika"].mean()
-        # Najlepszy pakowacz to pierwszy wiersz, jeśli karta sortuje malejąco
         top_packer = df.iloc[0]["packing_user_login"]
 
         col1, col2, col3 = st.columns(3)
@@ -99,7 +125,6 @@ if not df.empty:
         col3.metric("🏆 Najlepszy pakowacz", top_packer)
 
         st.subheader("📦 Ranking wydajności pakowania")
-        # Sortowanie dla wykresu, aby upewnić się, że jest poprawne
         df_sorted = df.sort_values(by="paczki_pracownika", ascending=True)
 
         fig_packing = px.bar(
@@ -110,17 +135,15 @@ if not df.empty:
             labels={"packing_user_login": "Login pracownika", "paczki_pracownika": "Liczba paczek"},
             orientation='h'
         )
-        # Zwiększenie czytelności osi Y
         fig_packing.update_layout(yaxis={'categoryorder': 'total ascending'})
         st.plotly_chart(fig_packing, use_container_width=True)
 
     except KeyError as e:
         st.error(
-            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych z Metabase. Błąd kolumny: {e}")
+            f"❌ Błąd: Upewnij się, że kolumny 'packing_user_login' i 'paczki_pracownika' istnieją w danych. Błąd kolumny: {e}")
     except IndexError:
         st.warning("Brak danych w DataFrame dla wybranej daty.")
     except Exception as e:
         st.error(f"❌ Wystąpił błąd przy generowaniu wskaźników lub wykresów: {e}")
 else:
-    st.warning(
-        "Brak danych do wyświetlenia 🚧. Upewnij się, że karta Metabase jest poprawnie skonfigurowana i dostępne są dane dla wybranej daty.")
+    st.warning("Brak danych do wyświetlenia 🚧. Sprawdź, czy dane są dostępne dla wybranej daty.")
