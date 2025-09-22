@@ -54,10 +54,9 @@ def get_packing_data(date_param):
     """
     try:
         card_id = 55
-        url = f"{METABASE_URL}/api/card/{card_id}/query/json"
+        url = f"{METABASE_URL}/api/card/{card_id}/query"
 
         # Ładunek JSON z parametrem daty.
-        # Nazwa parametru "selected_date" musi zgadzać się z nazwą zmiennej w Metabase.
         payload = {
             "parameters": [
                 {"type": "date/single", "value": date_param, "name": "selected_date"}
@@ -71,8 +70,16 @@ def get_packing_data(date_param):
         if not data:
             return pd.DataFrame()
 
-        df = pd.DataFrame(data)
+        # Kluczowa zmiana: filtrujemy dane, aby upewnić się, że każdy element jest pełny
+        filtered_data = [item for item in data if 'packing_user_login' in item and 'paczki_pracownika' in item]
 
+        if not filtered_data:
+            st.error("❌ Dane z Metabase są niekompletne. Sprawdź zapytanie.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(filtered_data)
+
+        # Sprawdzenie, czy kolumny istnieją po filtracji
         if 'paczki_pracownika' not in df.columns or 'packing_user_login' not in df.columns:
             st.error("❌ Błąd: Dane z Metabase nie zawierają oczekiwanych kolumn.")
             return pd.DataFrame()
