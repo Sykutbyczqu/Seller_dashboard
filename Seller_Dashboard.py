@@ -61,7 +61,7 @@ def get_packing_data(date_param):
         # Ładunek JSON z parametrem daty
         payload = {
             "parameters": [
-                {"type": "date/single", "value": date_param, "name": "selected_date"}
+                {"type": "date", "value": date_param}
             ]
         }
 
