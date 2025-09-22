@@ -102,7 +102,7 @@ if not df.empty:
 
         # Dodanie warunku do dynamicznej zmiany koloru
         df_sorted['color'] = df_sorted['paczki_pracownika'].apply(
-            lambda x: 'Więcej niż 300' if x > 300 else '300 lub mniej')
+            lambda x: 'Więcej niż 300' if x >= 300 else '300 lub mniej')
 
         fig_packing = px.bar(
             df_sorted,
