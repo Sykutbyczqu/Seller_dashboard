@@ -157,17 +157,17 @@ lines AS (
     COALESCE(pp.default_code, l.product_id::text) AS sku,   -- SKU
     COALESCE(pt.name, l.name) AS product_name,               -- nazwa
     COALESCE(l.product_uom_qty, 0) AS qty,                   -- ilość
-    -- wartość linii W WALUCIE ZAMÓWIENIA (tu: PLN, bo filtrujemy niżej):
+    -- wartość linii (w walucie linii); po filtrze cur.name='PLN' to będzie PLN
     COALESCE(l.price_total, l.price_subtotal,
              l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total_pln,
     COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
   FROM sale_order_line l
   JOIN sale_order s           ON s.id = l.order_id
-  JOIN res_currency cur       ON cur.id = s.currency_id   -- ⬅️ filtr waluty po joinie
+  JOIN res_currency cur       ON cur.id = l.currency_id      -- << używamy l.currency_id
   LEFT JOIN product_product  pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
-    AND cur.name = 'PLN'                                    -- ⬅️ tylko PLN
+    AND cur.name = 'PLN'                                     -- << tylko PLN
 ),
 w AS (
   SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
@@ -211,7 +211,6 @@ LEFT JOIN prev p ON p.sku = c.sku
 WHERE COALESCE(c.curr_rev,0) > 0
 ORDER BY c.curr_rev DESC
 LIMIT 100;
-
 """
 
 @st.cache_data(ttl=600)
