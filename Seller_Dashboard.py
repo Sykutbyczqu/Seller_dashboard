@@ -154,32 +154,20 @@ WITH params AS (
 lines AS (
   SELECT
     l.product_id,
-    COALESCE(pp.default_code, l.product_id::text) AS sku,                 -- SKU (default_code)
-    COALESCE(pt.name, l.name) AS product_name,                             -- nazwa
-    COALESCE(l.product_uom_qty, 0) AS qty,                                 -- ilość
-    -- surowa wartość linii (na potrzeby rozdziału proporcjonalnego):
+    COALESCE(pp.default_code, l.product_id::text) AS sku,   -- SKU
+    COALESCE(pt.name, l.name) AS product_name,               -- nazwa
+    COALESCE(l.product_uom_qty, 0) AS qty,                   -- ilość
+    -- wartość linii W WALUCIE ZAMÓWIENIA (tu: PLN, bo filtrujemy niżej):
     COALESCE(l.price_total, l.price_subtotal,
-             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total_raw,
-    -- PRZEWALUTOWANA wartość linii:
-    COALESCE(
-      l.amount_total_cur_conv,            -- jeśli Twoja baza ma takie pole na linii
-      l.price_total_cur_conv,
-      l.line_total_cur_conv,
-      CASE WHEN COALESCE(s.amount_total,0) <> 0 AND s.amount_total_cur_conv IS NOT NULL
-           THEN s.amount_total_cur_conv * (
-                 COALESCE(l.price_total, l.price_subtotal,
-                          l.price_unit * COALESCE(l.product_uom_qty,0), 0)
-                 / NULLIF(s.amount_total,0)
-           )
-           ELSE NULL
-      END
-    ) AS line_total_conv,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total_pln,
     COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
   FROM sale_order_line l
-  JOIN sale_order s          ON s.id = l.order_id
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = s.currency_id   -- ⬅️ filtr waluty po joinie
   LEFT JOIN product_product  pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'                                    -- ⬅️ tylko PLN
 ),
 w AS (
   SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
@@ -188,30 +176,28 @@ curr AS (
   SELECT
     l.sku,
     MAX(l.product_name) AS product_name,
-    SUM(l.line_total_conv) AS curr_rev,             -- tylko przewalutowane
-    SUM(l.qty)           AS curr_qty
+    SUM(l.line_total_pln) AS curr_rev,   -- suma PLN (bieżący tydzień)
+    SUM(l.qty)            AS curr_qty
   FROM lines l CROSS JOIN w
-  WHERE l.line_total_conv IS NOT NULL
-    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
     AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
   GROUP BY l.sku
 ),
 prev AS (
   SELECT
     l.sku,
-    SUM(l.line_total_conv) AS prev_rev,             -- tylko przewalutowane
-    SUM(l.qty)             AS prev_qty
+    SUM(l.line_total_pln) AS prev_rev,   -- suma PLN (poprzedni tydzień)
+    SUM(l.qty)            AS prev_qty
   FROM lines l CROSS JOIN w
-  WHERE l.line_total_conv IS NOT NULL
-    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
     AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
   GROUP BY l.sku
 )
 SELECT
   c.sku,
   c.product_name,
-  c.curr_rev,
-  c.curr_qty,
+  COALESCE(c.curr_rev,0) AS curr_rev,
+  COALESCE(c.curr_qty,0) AS curr_qty,
   COALESCE(p.prev_rev,0) AS prev_rev,
   COALESCE(p.prev_qty,0) AS prev_qty,
   CASE WHEN COALESCE(p.prev_rev,0)=0 AND COALESCE(c.curr_rev,0)>0 THEN NULL
@@ -222,8 +208,10 @@ SELECT
        ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
 FROM curr c
 LEFT JOIN prev p ON p.sku = c.sku
+WHERE COALESCE(c.curr_rev,0) > 0
 ORDER BY c.curr_rev DESC
 LIMIT 100;
+
 """
 
 @st.cache_data(ttl=600)
