@@ -392,13 +392,28 @@ df_trend = query_trend_many_weeks(SQL_WOW_TOP10, week_start, weeks=weeks_back)
 if df_trend.empty:
     st.info("Brak danych trendu (dla wybranej liczby tygodni).")
 else:
-    candidates = pd.concat([df_top["sku"], df_trend["sku"].value_counts().head(30).index.to_series()]).unique().tolist()
-    pick_skus = st.multiselect("Wybierz SKU do analizy trendu", options=candidates, default=candidates[:3])
+    all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
+
+    # 🔍 pole do filtrowania SKU/nazwy
+    search_term = st.text_input("Szukaj SKU lub produktu", "")
+    if search_term:
+        filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()]
+    else:
+        filtered_skus = all_skus
+
+    pick_skus = st.multiselect(
+        "Wybierz SKU do analizy trendu",
+        options=filtered_skus,
+        default=filtered_skus[:5] if filtered_skus else []
+    )
+
     chart_type = st.radio("Typ wykresu", ["area", "line"], index=0, horizontal=True)
+
     if pick_skus:
         df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
         df_plot = df_plot.groupby(["week_start","sku"])["curr_rev"].sum().reset_index()
         pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+
         fig_tr = go.Figure()
         for sku in pv.columns:
             y = pv[sku].values
