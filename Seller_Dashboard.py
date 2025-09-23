@@ -2,29 +2,29 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time
 from zoneinfo import ZoneInfo
 
-# -----------------------
+# ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
-# -----------------------
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="E-commerce Dashboard", layout="wide")
 st.title("📊 Dashboard wydajności pakowania")
 
-# -----------------------
-# 2) Konfiguracja Metabase
-# -----------------------
+# ─────────────────────────────────────────────────────────────
+# 2) Ustawienia Metabase
+# ─────────────────────────────────────────────────────────────
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
-METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))  # <- dostosuj jeśli trzeba
+METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))
 METABASE_USER = st.secrets["metabase_user"]
 METABASE_PASSWORD = st.secrets["metabase_password"]
 
 TZ = ZoneInfo("Europe/Warsaw")
 
-# -----------------------
-# 3) Logowanie do Metabase
-# -----------------------
-@st.cache_data(ttl=50*60)  # 50 minut
+# ─────────────────────────────────────────────────────────────
+# 3) Logowanie do Metabase (cache ~50 min)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=50 * 60)
 def get_metabase_session() -> str | None:
     try:
         payload = {"username": METABASE_USER, "password": METABASE_PASSWORD}
@@ -38,36 +38,15 @@ def get_metabase_session() -> str | None:
 session_id = get_metabase_session()
 headers = {"X-Metabase-Session": session_id} if session_id else {}
 
-# -----------------------
-# 4) UI: wybór zakresu i trybu doby
-# -----------------------
+# ─────────────────────────────────────────────────────────────
+# 4) UI — wybór jednego dnia (00:00–24:00)
+# ─────────────────────────────────────────────────────────────
 st.sidebar.header("🔎 Filtry")
-default_end = date.today() - timedelta(days=1)       # domyślnie: wczoraj
-default_start = default_end - timedelta(days=7)      # ostatnie 7 dni do wczoraj
-day = st.sidebar.date_input("Dzień (00:00–24:00)", value=date.today() - timedelta(days=1))
-start_d = st.sidebar.date_input("Okres od (data)", value=default_start)
-end_d = st.sidebar.date_input("Okres do (data)", value=default_end, min_value=start_d)
+selected_day = st.sidebar.date_input("Dzień (00:00–24:00)", value=date.today() - timedelta(days=1))
 
-shifted_window = st.sidebar.checkbox("Doba magazynowa 18–18", value=True,
-                                     help="Jeśli włączone: od 18:00 dnia 'od' do 18:00 dnia po 'do'. "
-                                          "Jeśli wyłączone: od 00:00 dnia 'od' do 00:00 dnia po 'do'.")
-
-# Wylicz ramy czasowe w PL
-if shifted_window:
-    start_ts_pl = datetime.combine(start_d, datetime.min.time()).replace(tzinfo=TZ) + timedelta(hours=18)
-    end_ts_pl   = (datetime.combine(end_d, datetime.min.time()).replace(tzinfo=TZ) + timedelta(days=1, hours=18))
-else:
-    start_ts_pl = datetime.combine(start_d, datetime.min.time()).replace(tzinfo=TZ)
-    end_ts_pl   = datetime.combine(end_d + timedelta(days=1), datetime.min.time()).replace(tzinfo=TZ)
-
-# Metabase przyjmuje ISO8601; zostawiamy offset strefy (np. +02:00)
-start_iso = start_ts_pl.isoformat()
-end_iso = end_ts_pl.isoformat()
-
-# -----------------------
-# 5) Zapytanie: /api/dataset (native SQL + template-tags)
-# -----------------------
-# Wariant doby 18–18 (magazynowa)
+# ─────────────────────────────────────────────────────────────
+# 5) SQL: jeden dzień 00:00–24:00 (parametr {{day}})
+# ─────────────────────────────────────────────────────────────
 SQL_DAY_0000_24 = """
 SELECT 
     p.name AS packing_user_login,
@@ -81,6 +60,10 @@ WHERE s.packing_user IS NOT NULL
 GROUP BY p.name
 ORDER BY paczki_pracownika DESC;
 """
+
+# ─────────────────────────────────────────────────────────────
+# 6) Pobranie danych dla jednego dnia (cache ~10 min)
+# ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def query_packing_data_for_day(day_iso: str) -> pd.DataFrame:
     if not session_id:
@@ -105,39 +88,44 @@ def query_packing_data_for_day(day_iso: str) -> pd.DataFrame:
         r.raise_for_status()
         j = r.json()
 
+        # standardowy format Metabase data/rows/cols
         if isinstance(j, dict) and "data" in j and "rows" in j["data"]:
             cols = [c.get("name") for c in j["data"].get("cols", [])]
             rows = j["data"]["rows"]
             df = pd.DataFrame([[row[i] for i in range(len(cols))] for row in rows], columns=cols)
         else:
+            # fallback: czasem zwraca listę słowników
             df = pd.DataFrame(j)
 
-        if not df.empty and "paczki_pracownika" in df.columns:
-            df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
+        if not df.empty:
+            if "paczki_pracownika" in df.columns:
+                df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
+            if "packing_user_login" not in df.columns:
+                st.error("❌ Brak kolumny 'packing_user_login' w zwróconych danych.")
+                return pd.DataFrame()
         return df
+
     except requests.HTTPError as err:
-        st.error(f"❌ Błąd HTTP Metabase: {err} | {(getattr(err, 'response', None) and err.response.text[:200])}")
+        body = getattr(err, "response", None)
+        body_txt = (body.text[:300] if body is not None and hasattr(body, "text") else "")
+        st.error(f"❌ Błąd HTTP Metabase: {err} | {body_txt}")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Wystąpił błąd podczas pobierania danych: {e}")
         return pd.DataFrame()
 
-df = query_packing_data_for_day(day.isoformat())
+df = query_packing_data_for_day(selected_day.isoformat())
 
+# ─────────────────────────────────────────────────────────────
+# 7) Prezentacja: opis zakresu, KPI i wykres
+# ─────────────────────────────────────────────────────────────
 st.header("Raport pakowania (00:00–24:00)")
-start_ts = datetime.combine(day, datetime.min.time(), tzinfo=TZ)
-end_ts   = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=TZ)
+start_ts = datetime.combine(selected_day, time(0, 0), tzinfo=TZ)
+end_ts   = datetime.combine(selected_day + timedelta(days=1), time(0, 0), tzinfo=TZ)
 st.caption(f"Zakres: **{start_ts.strftime('%Y-%m-%d %H:%M')}** → **{end_ts.strftime('%Y-%m-%d %H:%M')}** (Europe/Warsaw)")
 
-
-# -----------------------
-# 6) KPI + wykres
-# -----------------------
-st.header("Raport pakowania")
-st.caption(f"Zakres: **{start_ts_pl.strftime('%Y-%m-%d %H:%M')}** → **{end_ts_pl.strftime('%Y-%m-%d %H:%M')}**  (Europe/Warsaw)")
-
 if df.empty:
-    st.warning("Brak danych w wybranym zakresie. Zmień daty lub tryb doby.")
+    st.warning("Brak danych w wybranym dniu. Zmień datę.")
 else:
     try:
         total_packages = int(df["paczki_pracownika"].sum())
@@ -145,7 +133,7 @@ else:
 
         # Najlepszy pakowacz
         idx = df["paczki_pracownika"].idxmax()
-        top_packer = df.loc[idx, "packing_user_login"]
+        top_packer = str(df.loc[idx, "packing_user_login"])
         top_value = int(df.loc[idx, "paczki_pracownika"])
 
         c1, c2, c3 = st.columns(3)
@@ -173,10 +161,10 @@ else:
         st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Podgląd danych"):
-            st.dataframe(df_sorted.rename(columns={
-                "packing_user_login": "Pracownik",
-                "paczki_pracownika": "Spakowane paczki"
-            }), use_container_width=True)
+            st.dataframe(
+                df_sorted.rename(columns={"packing_user_login": "Pracownik", "paczki_pracownika": "Spakowane paczki"}),
+                use_container_width=True
+            )
 
     except KeyError as e:
         st.error(f"❌ Brak oczekiwanej kolumny w danych: {e}")
