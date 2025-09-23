@@ -154,13 +154,16 @@ WITH params AS (
 lines AS (
   SELECT
     l.product_id,
-    COALESCE(l.product_code, l.sku, l.code) AS sku,
-    COALESCE(l.product_name, l.name)       AS product_name,
-    COALESCE(l.quantity, l.product_uom_qty, l.qty, l.count) AS qty,
-    COALESCE(l.amount_total_cur_conv, l.price_total, l.price_brutto, l.line_total, l.price_subtotal, l.amount) AS line_total,
-    s.create_date
-  FROM sale_order s
-  JOIN sale_order_line l ON l.order_id = s.id   -- Jeśli nazwa linii inna, podmień tu
+    COALESCE(pp.default_code, l.product_id::text) AS sku,           -- SKU
+    COALESCE(pt.name, l.name) AS product_name,                       -- Nazwa
+    COALESCE(l.product_uom_qty, 0) AS qty,                           -- Ilość
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,  -- Wartość linii
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts         -- Czas zamówienia
+  FROM sale_order_line l
+  JOIN sale_order s        ON s.id = l.order_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
 ),
 w AS (
@@ -173,8 +176,8 @@ curr AS (
     SUM(COALESCE(l.line_total,0)) AS curr_rev,
     SUM(COALESCE(l.qty,0))        AS curr_qty
   FROM lines l CROSS JOIN w
-  WHERE (l.create_date AT TIME ZONE 'Europe/Warsaw') >= w.week_start
-    AND (l.create_date AT TIME ZONE 'Europe/Warsaw') <  w.week_end
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
   GROUP BY l.sku
 ),
 prev AS (
@@ -183,8 +186,8 @@ prev AS (
     SUM(COALESCE(l.line_total,0)) AS prev_rev,
     SUM(COALESCE(l.qty,0))        AS prev_qty
   FROM lines l CROSS JOIN w
-  WHERE (l.create_date AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
-    AND (l.create_date AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
   GROUP BY l.sku
 )
 SELECT
