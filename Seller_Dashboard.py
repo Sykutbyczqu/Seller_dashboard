@@ -430,4 +430,95 @@ COLS_DISPLAY = {
     "prev_rev": "Sprzedaż poprzedniego tygodnia (PLN)",
     "rev_change_pct": "Zmiana sprzedaży %",
     "curr_qty": "Ilość tygodnia (szt.)",
-    "prev_qty": "Ilość poprzedniego tygod_
+    "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
+    "qty_change_pct": "Zmiana ilości %",
+    "status_rev": "Status (wartość)",
+    "status_qty": "Status (ilość)"
+}
+
+def to_display(df_in: pd.DataFrame) -> pd.DataFrame:
+    out = df_in.rename(columns=COLS_DISPLAY)
+    keep = [c for c in ["SKU","Produkt","Sprzedaż tygodnia (PLN)","Sprzedaż poprzedniego tygodnia (PLN)","Zmiana sprzedaży %","Ilość tygodnia (szt.)","Ilość poprzedniego tygodnia (szt.)","Zmiana ilości %","Status (wartość)","Status (ilość)"] if c in out.columns]
+    return out[keep]
+
+ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
+downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
+
+colA, colB = st.columns(2)
+with colA:
+    st.markdown("### 🚀 Wzrosty (≥ próg)")
+    if ups.empty:
+        st.info("Brak pozycji przekraczających próg wzrostu.")
+    else:
+        st.dataframe(to_display(ups), use_container_width=True)
+with colB:
+    st.markdown("### 📉 Spadki (≤ -próg)")
+    if downs.empty:
+        st.info("Brak pozycji przekraczających próg spadku.")
+    else:
+        st.dataframe(to_display(downs), use_container_width=True)
+
+# ─────────────────────────────────────────────────────────────
+# 16) Podgląd TOPN (tabela)
+# ─────────────────────────────────────────────────────────────
+with st.expander("🔎 Podgląd TOP (tabela)"):
+    st.dataframe(to_display(df_top), use_container_width=True)
+
+# ─────────────────────────────────────────────────────────────
+# 17) Eksport: CSV, Excel, PDF
+# ─────────────────────────────────────────────────────────────
+st.subheader("📥 Eksport danych")
+download_col1, download_col2, download_col3 = st.columns(3)
+
+# CSV
+csv_bytes = df.to_csv(index=False).encode("utf-8")
+download_col1.download_button("📥 Pobierz (CSV)", csv_bytes, "sprzedaz.csv", "text/csv")
+
+# Excel
+def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        dframe.to_excel(writer, index=False, sheet_name="sprzedaz")
+        writer.save()
+    return output.getvalue()
+
+excel_bytes = to_excel_bytes(df)
+download_col2.download_button("📥 Pobierz (Excel)", excel_bytes, "sprzedaz.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# PDF (generujemy prostą tabelę jako PDF używając matplotlib -> PdfPages)
+def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
+    buf = io.BytesIO()
+    # ogranicz liczbę wierszy dla PDF (np. pierwsze 200) by uniknąć bardzo długich PDFów
+    d = dframe.copy().head(200)
+    with PdfPages(buf) as pdf:
+        fig, ax = plt.subplots(figsize=(11.69, 8.27))  # A4 landscape
+        ax.axis('off')
+        ax.set_title(title, fontsize=14, loc='left')
+        # render table
+        table = ax.table(cellText=d.values, colLabels=d.columns, loc='center', cellLoc='left')
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.2)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+pdf_bytes = df_to_pdf_bytes(to_display(df_top), title=f"TOP{top_n} - raport tygodniowy")
+download_col3.download_button("📥 Pobierz (PDF) — TOP", pdf_bytes, "sprzedaz_top.pdf", "application/pdf")
+
+# ─────────────────────────────────────────────────────────────
+# 18) Panel debug / QA
+# ─────────────────────────────────────────────────────────────
+with st.expander("🔧 Panel QA / Debug"):
+    st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))
+    st.write("Liczba wierszy (snapshot):", len(df))
+    st.write("Liczba SKU w snapshot:", df["sku"].nunique())
+    st.write("SKU bez nazwy:", df[df["product_name"].isna()]["sku"].unique().tolist())
+    if debug_api:
+        st.subheader("Raw JSON (Metabase)")
+        st.json(st.session_state.get("mb_last_json"))
+
+# ─────────────────────────────────────────────────────────────
+# Koniec pliku
+# ─────────────────────────────────────────────────────────────
