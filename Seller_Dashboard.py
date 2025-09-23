@@ -44,7 +44,7 @@ headers = {"X-Metabase-Session": session_id} if session_id else {}
 st.sidebar.header("🔎 Filtry")
 default_end = date.today() - timedelta(days=1)       # domyślnie: wczoraj
 default_start = default_end - timedelta(days=7)      # ostatnie 7 dni do wczoraj
-
+day = st.sidebar.date_input("Dzień (00:00–24:00)", value=date.today() - timedelta(days=1))
 start_d = st.sidebar.date_input("Okres od (data)", value=default_start)
 end_d = st.sidebar.date_input("Okres do (data)", value=default_end, min_value=start_d)
 
@@ -68,7 +68,7 @@ end_iso = end_ts_pl.isoformat()
 # 5) Zapytanie: /api/dataset (native SQL + template-tags)
 # -----------------------
 # Wariant doby 18–18 (magazynowa)
-SQL_1818 = """
+SQL_DAY_0000_24 = """
 SELECT 
     p.name AS packing_user_login,
     COUNT(s.name) AS paczki_pracownika
@@ -76,50 +76,27 @@ FROM sale_order s
 JOIN res_users   u ON s.packing_user = u.id
 JOIN res_partner p ON u.partner_id   = p.id
 WHERE s.packing_user IS NOT NULL
-  AND s.packing_date >= ({{start_d}}::date + INTERVAL '18 hours')
-  AND s.packing_date <  ({{end_d}}::date   + INTERVAL '1 day' + INTERVAL '18 hours')
-GROUP BY p.name
-ORDER BY paczki_pracownika DESC;
-"""
-
-# Wariant doby 00–00 (kalendarzowa)
-SQL_0000 = """
-SELECT 
-    p.name AS packing_user_login,
-    COUNT(s.name) AS paczki_pracownika
-FROM sale_order s
-JOIN res_users   u ON s.packing_user = u.id
-JOIN res_partner p ON u.partner_id   = p.id
-WHERE s.packing_user IS NOT NULL
-  AND s.packing_date >= ({{start_d}}::date)
-  AND s.packing_date <  ({{end_d}}::date + INTERVAL '1 day')
+  AND s.packing_date >= ({{day}}::date)
+  AND s.packing_date <  ({{day}}::date + INTERVAL '1 day')
 GROUP BY p.name
 ORDER BY paczki_pracownika DESC;
 """
 @st.cache_data(ttl=600)
-def query_packing_data_by_dates(start_date_str: str, end_date_str: str, use_1818: bool) -> pd.DataFrame:
-    """
-    Odpytuje Metabase /api/dataset z parametrami dat: start_d / end_d.
-    Gdy use_1818=True – liczy 18→18, w przeciwnym wypadku 00→00.
-    """
+def query_packing_data_for_day(day_iso: str) -> pd.DataFrame:
     if not session_id:
         return pd.DataFrame()
-
-    sql = SQL_1818 if use_1818 else SQL_0000
 
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
         "native": {
-            "query": sql,
+            "query": SQL_DAY_0000_24,
             "template-tags": {
-                "start_d": {"name": "start_d", "display-name": "start_d", "type": "date"},
-                "end_d":   {"name": "end_d",   "display-name": "end_d",   "type": "date"},
+                "day": {"name": "day", "display-name": "day", "type": "date"}
             },
         },
         "parameters": [
-            {"type": "date", "target": ["variable", ["template-tag", "start_d"]], "value": start_date_str},
-            {"type": "date", "target": ["variable", ["template-tag", "end_d"]],   "value": end_date_str},
+            {"type": "date", "target": ["variable", ["template-tag", "day"]], "value": day_iso},
         ],
     }
 
@@ -138,7 +115,6 @@ def query_packing_data_by_dates(start_date_str: str, end_date_str: str, use_1818
         if not df.empty and "paczki_pracownika" in df.columns:
             df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
         return df
-
     except requests.HTTPError as err:
         st.error(f"❌ Błąd HTTP Metabase: {err} | {(getattr(err, 'response', None) and err.response.text[:200])}")
         return pd.DataFrame()
@@ -146,7 +122,13 @@ def query_packing_data_by_dates(start_date_str: str, end_date_str: str, use_1818
         st.error(f"❌ Wystąpił błąd podczas pobierania danych: {e}")
         return pd.DataFrame()
 
-df = query_packing_data_by_dates(start_d.isoformat(), end_d.isoformat(), use_1818=shifted_window)
+df = query_packing_data_for_day(day.isoformat())
+
+st.header("Raport pakowania (00:00–24:00)")
+start_ts = datetime.combine(day, datetime.min.time(), tzinfo=TZ)
+end_ts   = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=TZ)
+st.caption(f"Zakres: **{start_ts.strftime('%Y-%m-%d %H:%M')}** → **{end_ts.strftime('%Y-%m-%d %H:%M')}** (Europe/Warsaw)")
+
 
 # -----------------------
 # 6) KPI + wykres
