@@ -50,7 +50,8 @@ lines AS (
   LEFT JOIN product_product  pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
-    AND cur.name = 'PLN'
+    AND cur.name = 'PLN'                 -- tylko PLN
+    AND s.name ILIKE '%Allegro%'         -- tylko zamówienia z numerem zawierającym "Allegro"
 ),
 w AS (
   SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
