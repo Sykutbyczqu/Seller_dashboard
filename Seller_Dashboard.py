@@ -67,7 +67,8 @@ end_iso = end_ts_pl.isoformat()
 # -----------------------
 # 5) Zapytanie: /api/dataset (native SQL + template-tags)
 # -----------------------
-SQL = """
+# Wariant doby 18–18 (magazynowa)
+SQL_1818 = """
 SELECT 
     p.name AS packing_user_login,
     COUNT(s.name) AS paczki_pracownika
@@ -75,43 +76,51 @@ FROM sale_order s
 JOIN res_users   u ON s.packing_user = u.id
 JOIN res_partner p ON u.partner_id   = p.id
 WHERE s.packing_user IS NOT NULL
-  AND (s.packing_date AT TIME ZONE 'Europe/Warsaw') >= {{start_ts}}
-  AND (s.packing_date AT TIME ZONE 'Europe/Warsaw') <  {{end_ts}}
+  AND s.packing_date >= ({{start_d}}::date + INTERVAL '18 hours')
+  AND s.packing_date <  ({{end_d}}::date   + INTERVAL '1 day' + INTERVAL '18 hours')
 GROUP BY p.name
 ORDER BY paczki_pracownika DESC;
 """
 
+# Wariant doby 00–00 (kalendarzowa)
+SQL_0000 = """
+SELECT 
+    p.name AS packing_user_login,
+    COUNT(s.name) AS paczki_pracownika
+FROM sale_order s
+JOIN res_users   u ON s.packing_user = u.id
+JOIN res_partner p ON u.partner_id   = p.id
+WHERE s.packing_user IS NOT NULL
+  AND s.packing_date >= ({{start_d}}::date)
+  AND s.packing_date <  ({{end_d}}::date + INTERVAL '1 day')
+GROUP BY p.name
+ORDER BY paczki_pracownika DESC;
+"""
 @st.cache_data(ttl=600)
-def query_packing_data(start_iso: str, end_iso: str) -> pd.DataFrame:
+def query_packing_data_by_dates(start_date_str: str, end_date_str: str, use_1818: bool) -> pd.DataFrame:
     """
-    Odpytuje Metabase /api/dataset z parametrami start_ts / end_ts (datetime).
-    Zwraca DataFrame z kolumnami: packing_user_login, paczki_pracownika
+    Odpytuje Metabase /api/dataset z parametrami dat: start_d / end_d.
+    Gdy use_1818=True – liczy 18→18, w przeciwnym wypadku 00→00.
     """
     if not session_id:
         return pd.DataFrame()
+
+    sql = SQL_1818 if use_1818 else SQL_0000
 
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
         "native": {
-            "query": SQL,
+            "query": sql,
             "template-tags": {
-                "start_ts": {
-                    "name": "start_ts",
-                    "display-name": "start_ts",
-                    "type": "datetime"
-                },
-                "end_ts": {
-                    "name": "end_ts",
-                    "display-name": "end_ts",
-                    "type": "datetime"
-                }
-            }
+                "start_d": {"name": "start_d", "display-name": "start_d", "type": "date"},
+                "end_d":   {"name": "end_d",   "display-name": "end_d",   "type": "date"},
+            },
         },
         "parameters": [
-            {"type": "datetime", "target": ["variable", ["template-tag", "start_ts"]], "value": start_iso},
-            {"type": "datetime", "target": ["variable", ["template-tag", "end_ts"]],   "value": end_iso},
-        ]
+            {"type": "date", "target": ["variable", ["template-tag", "start_d"]], "value": start_date_str},
+            {"type": "date", "target": ["variable", ["template-tag", "end_d"]],   "value": end_date_str},
+        ],
     }
 
     try:
@@ -119,29 +128,25 @@ def query_packing_data(start_iso: str, end_iso: str) -> pd.DataFrame:
         r.raise_for_status()
         j = r.json()
 
-        # Metabase różnie zwraca — obsłuż klasyczny format z 'data.rows/cols'
         if isinstance(j, dict) and "data" in j and "rows" in j["data"]:
             cols = [c.get("name") for c in j["data"].get("cols", [])]
             rows = j["data"]["rows"]
             df = pd.DataFrame([[row[i] for i in range(len(cols))] for row in rows], columns=cols)
         else:
-            # fallback, jeśli j to lista słowników
             df = pd.DataFrame(j)
 
-        if not df.empty:
-            # typy
-            if "paczki_pracownika" in df.columns:
-                df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
+        if not df.empty and "paczki_pracownika" in df.columns:
+            df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
         return df
 
     except requests.HTTPError as err:
-        st.error(f"❌ Błąd HTTP Metabase: {err} | {getattr(err, 'response', None) and err.response.text[:200]}")
+        st.error(f"❌ Błąd HTTP Metabase: {err} | {(getattr(err, 'response', None) and err.response.text[:200])}")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"❌ Wystąpił błąd podczas pobierania danych: {e}")
         return pd.DataFrame()
 
-df = query_packing_data(start_iso, end_iso)
+df = query_packing_data_by_dates(start_d.isoformat(), end_d.isoformat(), use_1818=shifted_window)
 
 # -----------------------
 # 6) KPI + wykres
