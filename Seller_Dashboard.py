@@ -1,16 +1,23 @@
-import streamlit as st
+# streamlit_app.py
+import time
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
-from datetime import datetime, date, timedelta, time
-from zoneinfo import ZoneInfo
+import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
-# Konfiguracja aplikacji
+# 1) Konfiguracja aplikacji
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="E-commerce Dashboard", layout="wide")
-st.title("📊 Dashboard magazyn & sprzedaż")
+st.set_page_config(page_title="E-commerce: WoW TOP10 (PLN)", layout="wide")
+st.title("🛒 Sprzedaż — WoW TOP 10 SKU (PLN)")
 
+# ─────────────────────────────────────────────────────────────
+# 2) Ustawienia Metabase
+# ─────────────────────────────────────────────────────────────
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
 METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))
 METABASE_USER = st.secrets["metabase_user"]
@@ -18,132 +25,9 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# Logowanie do Metabase (cache ~50 min)
+# 3) SQL — tylko PLN (filtr po l.currency_id → res_currency.name = 'PLN')
 # ─────────────────────────────────────────────────────────────
-@st.cache_data(ttl=50 * 60)
-def get_metabase_session() -> str | None:
-    try:
-        payload = {"username": METABASE_USER, "password": METABASE_PASSWORD}
-        r = requests.post(f"{METABASE_URL}/api/session", json=payload, timeout=15)
-        r.raise_for_status()
-        return r.json()["id"]
-    except Exception as e:
-        st.error(f"❌ Błąd logowania do Metabase: {e}")
-        return None
-
-session_id = get_metabase_session()
-headers = {"X-Metabase-Session": session_id} if session_id else {}
-
-# ─────────────────────────────────────────────────────────────
-# Sidebar: wybór modułu
-# ─────────────────────────────────────────────────────────────
-st.sidebar.header("🧭 Widok")
-view = st.sidebar.radio("Wybierz raport:", ["Pakowanie — dzień", "Sprzedaż — WoW TOP 10 SKU"])
-
-# ─────────────────────────────────────────────────────────────
-# Pakowanie — DZIEŃ (00:00–24:00)
-# ─────────────────────────────────────────────────────────────
-SQL_DAY_0000_24 = """
-SELECT 
-    p.name AS packing_user_login,
-    COUNT(s.name) AS paczki_pracownika
-FROM sale_order s
-JOIN res_users   u ON s.packing_user = u.id
-JOIN res_partner p ON u.partner_id   = p.id
-WHERE s.packing_user IS NOT NULL
-  AND s.packing_date >= ({{day}}::date)
-  AND s.packing_date <  ({{day}}::date + INTERVAL '1 day')
-GROUP BY p.name
-ORDER BY paczki_pracownika DESC;
-"""
-
-@st.cache_data(ttl=600)
-def query_packing_data_for_day(day_iso: str) -> pd.DataFrame:
-    if not session_id:
-        return pd.DataFrame()
-    payload = {
-        "database": METABASE_DATABASE_ID,
-        "type": "native",
-        "native": {
-            "query": SQL_DAY_0000_24,
-            "template-tags": {"day": {"name": "day", "display-name": "day", "type": "date"}},
-        },
-        "parameters": [{"type": "date", "target": ["variable", ["template-tag", "day"]], "value": day_iso}],
-    }
-    try:
-        r = requests.post(f"{METABASE_URL}/api/dataset", headers=headers, json=payload, timeout=60)
-        r.raise_for_status()
-        j = r.json()
-        if isinstance(j, dict) and "data" in j and "rows" in j["data"]:
-            cols = [c.get("name") for c in j["data"].get("cols", [])]
-            rows = j["data"]["rows"]
-            df = pd.DataFrame([[row[i] for i in range(len(cols))] for row in rows], columns=cols)
-        else:
-            df = pd.DataFrame(j)
-        if not df.empty and "paczki_pracownika" in df.columns:
-            df["paczki_pracownika"] = pd.to_numeric(df["paczki_pracownika"], errors="coerce").fillna(0).astype(int)
-        return df
-    except requests.HTTPError as err:
-        body = getattr(err, "response", None)
-        body_txt = (body.text[:300] if body is not None and hasattr(body, "text") else "")
-        st.error(f"❌ Błąd HTTP Metabase: {err} | {body_txt}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"❌ Wystąpił błąd podczas pobierania danych: {e}")
-        return pd.DataFrame()
-
-def render_packing_day():
-    st.sidebar.header("🔎 Filtry (pakowanie)")
-    selected_day = st.sidebar.date_input("Dzień (00:00–24:00)", value=date.today() - timedelta(days=1))
-    df = query_packing_data_for_day(selected_day.isoformat())
-
-    st.header("📦 Raport pakowania (00:00–24:00)")
-    start_ts = datetime.combine(selected_day, time(0, 0), tzinfo=TZ)
-    end_ts   = datetime.combine(selected_day + timedelta(days=1), time(0, 0), tzinfo=TZ)
-    st.caption(f"Zakres: **{start_ts:%Y-%m-%d %H:%M}** → **{end_ts:%Y-%m-%d %H:%M}** (Europe/Warsaw)")
-
-    if df.empty:
-        st.warning("Brak danych w wybranym dniu. Zmień datę.")
-        return
-
-    total_packages = int(df["paczki_pracownika"].sum())
-    avg_packages_per_user = float(df["paczki_pracownika"].mean()) if len(df) else 0.0
-    idx = df["paczki_pracownika"].idxmax()
-    top_packer = str(df.loc[idx, "packing_user_login"])
-    top_value = int(df.loc[idx, "paczki_pracownika"])
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("📦 Łączna liczba paczek", f"{total_packages:,}".replace(",", " "))
-    c2.metric("🧑‍💼 Średnia na pracownika", f"{avg_packages_per_user:,.0f}".replace(",", " "))
-    c3.metric("🏆 Najlepszy pakowacz", f"{top_packer} ({top_value})")
-
-    st.subheader("📦 Ranking wydajności pakowania")
-    df_sorted = df.sort_values(by="paczki_pracownika", ascending=True).copy()
-    df_sorted["próg 300"] = df_sorted["paczki_pracownika"].apply(lambda x: "≥ 300" if x >= 300 else "< 300")
-
-    fig = px.bar(
-        df_sorted,
-        x="paczki_pracownika", y="packing_user_login",
-        color="próg 300",
-        color_discrete_map={"≥ 300": "firebrick", "< 300": "cornflowerblue"},
-        title="Liczba paczek spakowanych przez pracownika",
-        labels={"packing_user_login": "Pracownik", "paczki_pracownika": "Liczba paczek"},
-        orientation="h", height=600
-    )
-    fig.add_vline(x=300, line_width=2, line_dash="dash", line_color="darkgray")
-    fig.update_layout(yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Podgląd danych"):
-        st.dataframe(
-            df_sorted.rename(columns={"packing_user_login": "Pracownik", "paczki_pracownika": "Spakowane paczki"}),
-            use_container_width=True
-        )
-
-# ─────────────────────────────────────────────────────────────
-# Sprzedaż — WoW TOP 10 SKU (+ alerty %)
-# ─────────────────────────────────────────────────────────────
-SQL_WOW_TOP10 = r"""
+SQL_WOW_TOP10 = """
 WITH params AS (
   SELECT
     {{week_start}}::date AS week_start,
@@ -157,17 +41,16 @@ lines AS (
     COALESCE(pp.default_code, l.product_id::text) AS sku,   -- SKU
     COALESCE(pt.name, l.name) AS product_name,               -- nazwa
     COALESCE(l.product_uom_qty, 0) AS qty,                   -- ilość
-    -- wartość linii (w walucie linii); po filtrze cur.name='PLN' to będzie PLN
     COALESCE(l.price_total, l.price_subtotal,
              l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total_pln,
     COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
   FROM sale_order_line l
   JOIN sale_order s           ON s.id = l.order_id
-  JOIN res_currency cur       ON cur.id = l.currency_id      -- << używamy l.currency_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
   LEFT JOIN product_product  pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
-    AND cur.name = 'PLN'                                     -- << tylko PLN
+    AND cur.name = 'PLN'
 ),
 w AS (
   SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
@@ -176,7 +59,7 @@ curr AS (
   SELECT
     l.sku,
     MAX(l.product_name) AS product_name,
-    SUM(l.line_total_pln) AS curr_rev,   -- suma PLN (bieżący tydzień)
+    SUM(l.line_total_pln) AS curr_rev,
     SUM(l.qty)            AS curr_qty
   FROM lines l CROSS JOIN w
   WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
@@ -186,7 +69,7 @@ curr AS (
 prev AS (
   SELECT
     l.sku,
-    SUM(l.line_total_pln) AS prev_rev,   -- suma PLN (poprzedni tydzień)
+    SUM(l.line_total_pln) AS prev_rev,
     SUM(l.qty)            AS prev_qty
   FROM lines l CROSS JOIN w
   WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
@@ -208,14 +91,29 @@ SELECT
        ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
 FROM curr c
 LEFT JOIN prev p ON p.sku = c.sku
-WHERE COALESCE(c.curr_rev,0) > 0
 ORDER BY c.curr_rev DESC
 LIMIT 100;
 """
 
-@st.cache_data(ttl=600)
-def _dataset_call(sql_text: str, params: dict, session: str) -> dict:
-    """Surowe wywołanie /api/dataset (zwraca JSON Metabase)."""
+# ─────────────────────────────────────────────────────────────
+# 4) Sesja Metabase (cache ~50 min)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=50 * 60)
+def get_metabase_session() -> str | None:
+    try:
+        payload = {"username": METABASE_USER, "password": METABASE_PASSWORD}
+        r = requests.post(f"{METABASE_URL}/api/session", json=payload, timeout=20)
+        r.raise_for_status()
+        return r.json()["id"]
+    except Exception as e:
+        st.error(f"❌ Błąd logowania do Metabase: {e}")
+        return None
+
+# ─────────────────────────────────────────────────────────────
+# 5) Wywołanie /api/dataset z obsługą 202 (polling) i 401
+# ─────────────────────────────────────────────────────────────
+def _dataset_call(sql_text: str, params: dict, session: str, poll_max_s: float = 12.0) -> dict:
+    """POST /api/dataset; obsługa 200/202 (+ polling), zwraca dict {status,json,text}."""
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
@@ -228,167 +126,216 @@ def _dataset_call(sql_text: str, params: dict, session: str) -> dict:
             for k, v in params.items()
         ],
     }
-    r = requests.post(f"{METABASE_URL}/api/dataset",
-                      headers={"X-Metabase-Session": session},
-                      json=payload, timeout=120)
-    # Nie r.raise_for_status() – sami obsłużymy 401/ inne
+    headers = {"X-Metabase-Session": session}
+    r = requests.post(f"{METABASE_URL}/api/dataset", headers=headers, json=payload, timeout=120)
+
+    if r.status_code == 401:
+        return {"status": 401, "json": None, "text": r.text}
+
+    if r.status_code == 200:
+        return {"status": 200, "json": (r.json() if r.content else None), "text": r.text}
+
+    if r.status_code == 202:
+        j = r.json() if r.content else {}
+        # (a) już są dane:
+        if isinstance(j, dict) and isinstance(j.get("data", {}).get("rows"), list):
+            return {"status": 200, "json": j, "text": r.text}
+        # (b) polling po tokenie:
+        token = j.get("id") or j.get("data", {}).get("id")
+        if token:
+            deadline = time.time() + poll_max_s
+            last = None
+            while time.time() < deadline:
+                rr = requests.get(f"{METABASE_URL}/api/dataset/{token}/json", headers=headers, timeout=60)
+                if rr.status_code == 200 and rr.content:
+                    return {"status": 200, "json": rr.json(), "text": rr.text}
+                rr = requests.get(f"{METABASE_URL}/api/dataset/{token}", headers=headers, timeout=60)
+                if rr.status_code == 200 and rr.content:
+                    return {"status": 200, "json": rr.json(), "text": rr.text}
+                last = rr
+                time.sleep(0.5)
+            return {"status": getattr(last, "status_code", 202), "json": None, "text": getattr(last, "text", "")}
+        # 202 bez tokena:
+        return {"status": 202, "json": None, "text": r.text}
+
     return {"status": r.status_code, "json": (r.json() if r.content else None), "text": r.text}
 
+# ─────────────────────────────────────────────────────────────
+# 6) Parser JSON Metabase → DataFrame (odporny na brak data.cols)
+# ─────────────────────────────────────────────────────────────
+def _metabase_json_to_df(j: dict) -> pd.DataFrame:
+    if not isinstance(j, (dict, list)):
+        return pd.DataFrame()
+
+    if isinstance(j, dict) and "data" in j and isinstance(j["data"], dict):
+        data = j["data"]
+        rows = data.get("rows", [])
+        cols_meta = data.get("cols", [])
+        if cols_meta:
+            col_names = [(c.get("name") or c.get("display_name") or f"col_{i}") for i, c in enumerate(cols_meta)]
+            if rows and isinstance(rows[0], dict):
+                df = pd.DataFrame(rows)
+            else:
+                df = pd.DataFrame(rows, columns=col_names)
+        else:
+            if not rows:
+                return pd.DataFrame()
+            if isinstance(rows[0], dict):
+                df = pd.DataFrame(rows)
+            else:
+                n = len(rows[0])
+                # Nasze zapytanie zwraca 8 kolumn:
+                expected = ["sku","product_name","curr_rev","curr_qty","prev_rev","prev_qty","rev_change_pct","qty_change_pct"]
+                col_names = expected[:n] if n == 8 else [f"c{i}" for i in range(n)]
+                df = pd.DataFrame(rows, columns=col_names)
+        return df
+
+    if isinstance(j, list):
+        return pd.DataFrame(j)
+
+    return pd.DataFrame()
+
+# ─────────────────────────────────────────────────────────────
+# 7) Publiczna funkcja pobrania danych (auto-refresh sesji, cache)
+# ─────────────────────────────────────────────────────────────
+@st.cache_data(ttl=600)
 def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
-    """Robust parser + auto-refresh sesji + anty-cache na zmianę SQL."""
-    # 1) Sesja
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
 
-    # 2) Pierwsze podejście
     res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
     if res["status"] == 401:
-        # odśwież sesję i spróbuj raz jeszcze
-        st.cache_data.clear()  # zbij cache _dataset_call z nieaktualną sesją
+        # sesja wygasła – wyczyść lokalny cache sesji i spróbuj raz jeszcze
+        get_metabase_session.clear()
         session = get_metabase_session()
         if not session:
             st.error("❌ Nie udało się odświeżyć sesji Metabase.")
             return pd.DataFrame()
         res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
 
-    # Debug (opcjonalnie pokażemy w UI)
+    # Debug hook
     st.session_state["mb_last_status"] = res["status"]
     st.session_state["mb_last_json"] = res["json"]
 
-    if res["status"] != 200 or not res["json"]:
-        st.error(f"❌ Metabase HTTP {res['status']}: {res.get('text','')[:300]}")
+    if res["status"] not in (200, 202) or not res["json"]:
+        st.error(f"❌ Metabase HTTP {res['status']}: {str(res.get('text',''))[:300]}")
         return pd.DataFrame()
 
-    j = res["json"]
-
-    # 3) Parsowanie różnych formatów odpowiedzi
-    df = None
-    try:
-        if isinstance(j, dict) and "data" in j and isinstance(j["data"], dict):
-            cols_meta = j["data"].get("cols", [])
-            # preferuj 'name', jeśli brak – 'display_name'
-            col_names = []
-            for i, c in enumerate(cols_meta):
-                name = c.get("name") or c.get("display_name") or f"col_{i}"
-                col_names.append(name)
-            rows = j["data"].get("rows", [])
-            if rows and isinstance(rows[0], dict):
-                df = pd.DataFrame(rows)  # czasem MB zwraca listę dictów
-            else:
-                df = pd.DataFrame([[row[i] for i in range(len(col_names))] for row in rows], columns=col_names)
-        elif isinstance(j, list):
-            df = pd.DataFrame(j)
-    except Exception as e:
-        st.error(f"❌ Błąd parsowania odpowiedzi Metabase: {e}")
-        df = pd.DataFrame()
-
-    if df is None:
-        df = pd.DataFrame()
-
-    # 4) Ujednolicenie nazw kolumn (lowercase, bez spacji)
+    df = _metabase_json_to_df(res["json"])
+    # Normalizacja nagłówków
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-
-    # 5) Konwersje typów (jeśli kolumny istnieją pod innymi “case’ami” – już mamy lowercase)
+    # Typy numeryczne
     for col in ["curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty", "qty_change_pct"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
     return df
 
-def last_completed_week_start(today_pl: date | None = None) -> date:
-    if today_pl is None:
-        today_pl = datetime.now(TZ).date()
-    monday_this = today_pl - timedelta(days=today_pl.weekday())
-    return monday_this - timedelta(days=7)
+# ─────────────────────────────────────────────────────────────
+# 8) UI: wybór tygodnia, próg alertu, panel debug
+# ─────────────────────────────────────────────────────────────
+def last_completed_week_start(today: date | None = None) -> date:
+    """Zwraca poniedziałek ostatniego zakończonego tygodnia (Mon)."""
+    d = today or datetime.now(TZ).date()
+    # jeśli dziś pn, ostatni zakończony tydzień zaczynał się 7 dni temu
+    offset = d.weekday() + 7
+    return d - timedelta(days=offset)
 
-def render_wow_top10():
-    st.sidebar.header("🔎 Filtry (sprzedaż)")
-    default_week = last_completed_week_start()
-    pick_day = st.sidebar.date_input("Wybierz tydzień (dowolny dzień tego tygodnia)", value=default_week)
-    week_start = pick_day - timedelta(days=pick_day.weekday())
-    threshold = st.sidebar.slider("Próg alertu (±%)", min_value=5, max_value=80, value=20, step=5)
-    debug_api = st.sidebar.toggle("Debug API", value=False)
+st.sidebar.header("🔎 Filtry")
+default_week = last_completed_week_start()
+pick_day = st.sidebar.date_input("Wybierz tydzień (podaj dowolny dzień z tego tygodnia)", value=default_week)
+week_start = pick_day - timedelta(days=pick_day.weekday())
+week_end = week_start + timedelta(days=7)
+threshold = st.sidebar.slider("Próg alertu (±%)", min_value=5, max_value=80, value=20, step=5)
+debug_api = st.sidebar.toggle("Debug API", value=False)
 
-    week_end = week_start + timedelta(days=7)
-    st.header("🛒 Sprzedaż — WoW TOP 10 SKU (PLN)")
-    st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  | Alert: ±{threshold}%  (Europe/Warsaw)")
+st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**, strefa: Europe/Warsaw")
 
-    # ⬇️ NOWE wywołanie (przekazujemy SQL jako argument)
-    df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
+# ─────────────────────────────────────────────────────────────
+# 9) Pobranie danych i prezentacja
+# ─────────────────────────────────────────────────────────────
+df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
 
-    if debug_api:
-        st.write(f"HTTP: {st.session_state.get('mb_last_status')}")
-        st.subheader("Raw JSON (Metabase)")
-        st.json(st.session_state.get("mb_last_json"))
-        st.subheader("DataFrame (head)")
-        st.dataframe(df.head(20), use_container_width=True)
+if debug_api:
+    st.write(f"Metabase HTTP: {st.session_state.get('mb_last_status')}")
+    st.subheader("Raw JSON (Metabase)")
+    st.json(st.session_state.get("mb_last_json"))
 
-    if df.empty:
-        st.warning("Brak danych dla wybranego tygodnia (PLN). Zmień tydzień lub sprawdź filtry.")
-        return
+if df.empty:
+    st.warning("Brak danych dla wybranego tygodnia (PLN). Zmień tydzień lub sprawdź źródło.")
+    st.stop()
 
-    # Upewnij się, że oczekiwane kolumny istnieją po normalizacji:
-    need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct"}
-    missing = [c for c in need if c not in df.columns]
-    if missing:
-        st.error(f"Brak kolumn w danych: {missing}. Sprawdź aliasy w SQL i parser.")
-        st.dataframe(df.head(), use_container_width=True)
-        return
+# Upewnij się, że mamy kolumny po normalizacji
+need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct"}
+missing = [c for c in need if c not in df.columns]
+if missing:
+    st.error(f"Brak kolumn w danych: {missing}")
+    st.dataframe(df.head(), use_container_width=True)
+    st.stop()
 
-    df_top = df.sort_values("curr_rev", ascending=False).head(10).copy()
-    def cat(p):
-        if pd.isna(p): return "n/d"
-        if p >= threshold: return f"↑ ≥{threshold}%"
-        if p <= -threshold: return f"↓ ≤-{threshold}%"
-        return "≈"
-    df_top["status"] = df_top["rev_change_pct"].apply(cat)
+# TOP 10 po wartości tygodnia
+df_top = df.sort_values("curr_rev", ascending=False).head(10).copy()
 
-    c1, c2, c3 = st.columns(3)
-    sum_curr = float(df["curr_rev"].sum() or 0)
-    sum_prev = float(df["prev_rev"].sum() or 0)
-    delta_abs = sum_curr - sum_prev
-    delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
-    c1.metric("Suma rev (tydz., PLN)", f"{sum_curr:,.0f}".replace(",", " "))
-    c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f}".replace(",", " "))
-    c3.metric("Δ% całości", f"{delta_pct:+.0f}%")
+def classify_change(pct: float | np.floating | None) -> str:
+    if pd.isna(pct): return "n/d"
+    if pct >= threshold: return f"↑ ≥{threshold}%"
+    if pct <= -threshold: return f"↓ ≤-{threshold}%"
+    return "≈"
 
-    st.subheader("TOP 10 (wartość tygodnia, PLN)")
-    fig = px.bar(
-        df_top, x="curr_rev", y="sku", color="status",
-        color_discrete_map={"≈": "#1f77b4", "n/d": "#7f7f7f"},
-        labels={"curr_rev": "Rev (tydzień, PLN)", "sku": "SKU"},
-        orientation="h", height=600
-    )
-    fig.update_layout(yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, use_container_width=True)
+df_top["status"] = df_top["rev_change_pct"].apply(classify_change)
 
-    ups = df_top[df_top["rev_change_pct"] >= threshold].copy()
-    downs = df_top[df_top["rev_change_pct"] <= -threshold].copy()
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("### 🚀 Wzrosty")
+# KPI całościowe
+sum_curr = float(df["curr_rev"].sum() or 0)
+sum_prev = float(df["prev_rev"].sum() or 0)
+delta_abs = sum_curr - sum_prev
+delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Suma rev (tydz., PLN)", f"{sum_curr:,.0f}".replace(",", " "))
+c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f}".replace(",", " "))
+c3.metric("Δ% całości", f"{delta_pct:+.0f}%")
+
+# Wykres TOP10
+st.subheader("TOP 10 (wartość tygodnia, PLN)")
+fig = px.bar(
+    df_top, x="curr_rev", y="sku", color="status",
+    labels={"curr_rev": "Rev (tydzień, PLN)", "sku": "SKU"},
+    orientation="h", height=600
+)
+fig.update_layout(yaxis={"categoryorder": "total ascending"})
+st.plotly_chart(fig, use_container_width=True)
+
+# Tabelki: wzrosty i spadki
+ups = df_top[df_top["rev_change_pct"] >= threshold].copy()
+downs = df_top[df_top["rev_change_pct"] <= -threshold].copy()
+colA, colB = st.columns(2)
+with colA:
+    st.markdown("### 🚀 Wzrosty")
+    if ups.empty:
+        st.info("Brak pozycji przekraczających próg wzrostu.")
+    else:
         st.dataframe(
             ups.rename(columns={
                 "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
                 "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
                 "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
             }),
-            use_container_width=True)
-    with colB:
-        st.markdown("### 📉 Spadki")
+            use_container_width=True
+        )
+with colB:
+    st.markdown("### 📉 Spadki")
+    if downs.empty:
+        st.info("Brak pozycji przekraczających próg spadku.")
+    else:
         st.dataframe(
             downs.rename(columns={
                 "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
                 "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
                 "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
             }),
-            use_container_width=True)
+            use_container_width=True
+        )
 
-# ─────────────────────────────────────────────────────────────
-# Router widoków
-# ─────────────────────────────────────────────────────────────
-if view == "Pakowanie — dzień":
-    render_packing_day()
-else:
-    render_wow_top10()
+# Podgląd danych (opcjonalnie)
+with st.expander("🔎 Podgląd danych"):
+    st.dataframe(df_top, use_container_width=True)
