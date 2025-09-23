@@ -285,8 +285,8 @@ delta_abs = sum_curr - sum_prev
 delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Suma sprzedaży (PLN, tydzień)", f"{sum_curr:,.0f}".replace(",", " "))
-c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f}".replace(",", " "))
+c1.metric("Suma sprzedaży (PLN, tydzień)", f"{sum_curr:,.0f} zł".replace(",", " "))
+c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f} zł".replace(",", " "))
 c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
 
 # Wykres TOP10 — etykiety PL
