@@ -12,8 +12,8 @@ import streamlit as st
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="E-commerce: WoW TOP10 (PLN)", layout="wide")
-st.title("🛒 Sprzedaż — WoW TOP 10 SKU (PLN)")
+st.set_page_config(page_title="Sprzedaż: WoW TOP 10 (PLN)", layout="wide")
+st.title("🛒 Sprzedaż — Tydzień do tygodnia (TOP 10 SKU, PLN)")
 
 # ─────────────────────────────────────────────────────────────
 # 2) Ustawienia Metabase
@@ -184,7 +184,6 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
                 df = pd.DataFrame(rows)
             else:
                 n = len(rows[0])
-                # Nasze zapytanie zwraca 8 kolumn:
                 expected = ["sku","product_name","curr_rev","curr_qty","prev_rev","prev_qty","rev_change_pct","qty_change_pct"]
                 col_names = expected[:n] if n == 8 else [f"c{i}" for i in range(n)]
                 df = pd.DataFrame(rows, columns=col_names)
@@ -206,7 +205,6 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
 
     res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
     if res["status"] == 401:
-        # sesja wygasła – wyczyść lokalny cache sesji i spróbuj raz jeszcze
         get_metabase_session.clear()
         session = get_metabase_session()
         if not session:
@@ -214,7 +212,6 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
             return pd.DataFrame()
         res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
 
-    # Debug hook
     st.session_state["mb_last_status"] = res["status"]
     st.session_state["mb_last_json"] = res["json"]
 
@@ -223,9 +220,7 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = _metabase_json_to_df(res["json"])
-    # Normalizacja nagłówków
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-    # Typy numeryczne
     for col in ["curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty", "qty_change_pct"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -235,10 +230,9 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
 # 8) UI: wybór tygodnia, próg alertu, panel debug
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
-    """Zwraca poniedziałek ostatniego zakończonego tygodnia (Mon)."""
+    """Poniedziałek ostatniego zakończonego tygodnia (Mon)."""
     d = today or datetime.now(TZ).date()
-    # jeśli dziś pn, ostatni zakończony tydzień zaczynał się 7 dni temu
-    offset = d.weekday() + 7
+    offset = d.weekday() + 7  # od poniedziałku wstecz o pełny tydzień
     return d - timedelta(days=offset)
 
 st.sidebar.header("🔎 Filtry")
@@ -249,10 +243,10 @@ week_end = week_start + timedelta(days=7)
 threshold = st.sidebar.slider("Próg alertu (±%)", min_value=5, max_value=80, value=20, step=5)
 debug_api = st.sidebar.toggle("Debug API", value=False)
 
-st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**, strefa: Europe/Warsaw")
+st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 9) Pobranie danych i prezentacja
+# 9) Pobranie danych i prezentacja (z polskimi nazwami kolumn)
 # ─────────────────────────────────────────────────────────────
 df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
 
@@ -265,15 +259,15 @@ if df.empty:
     st.warning("Brak danych dla wybranego tygodnia (PLN). Zmień tydzień lub sprawdź źródło.")
     st.stop()
 
-# Upewnij się, że mamy kolumny po normalizacji
-need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct"}
+# Walidacja kluczowych kolumn
+need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct","qty_change_pct"}
 missing = [c for c in need if c not in df.columns]
 if missing:
     st.error(f"Brak kolumn w danych: {missing}")
     st.dataframe(df.head(), use_container_width=True)
     st.stop()
 
-# TOP 10 po wartości tygodnia
+# Ranking TOP 10
 df_top = df.sort_values("curr_rev", ascending=False).head(10).copy()
 
 def classify_change(pct: float | np.floating | None) -> str:
@@ -291,51 +285,75 @@ delta_abs = sum_curr - sum_prev
 delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Suma rev (tydz., PLN)", f"{sum_curr:,.0f}".replace(",", " "))
+c1.metric("Suma sprzedaży (PLN, tydzień)", f"{sum_curr:,.0f}".replace(",", " "))
 c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f}".replace(",", " "))
-c3.metric("Δ% całości", f"{delta_pct:+.0f}%")
+c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
 
-# Wykres TOP10
-st.subheader("TOP 10 (wartość tygodnia, PLN)")
+# Wykres TOP10 — etykiety PL
+st.subheader("TOP 10 — Sprzedaż tygodnia (PLN)")
 fig = px.bar(
     df_top, x="curr_rev", y="sku", color="status",
-    labels={"curr_rev": "Rev (tydzień, PLN)", "sku": "SKU"},
+    labels={"curr_rev": "Sprzedaż tygodnia (PLN)", "sku": "SKU", "status": "Status zmiany"},
     orientation="h", height=600
 )
 fig.update_layout(yaxis={"categoryorder": "total ascending"})
 st.plotly_chart(fig, use_container_width=True)
 
-# Tabelki: wzrosty i spadki
+# Słownik faktycznych nazw do tabel
+COLS_DISPLAY = {
+    "sku": "SKU",
+    "product_name": "Produkt",
+    "curr_rev": "Sprzedaż tygodnia (PLN)",
+    "prev_rev": "Sprzedaż poprzedniego tygodnia (PLN)",
+    "rev_change_pct": "Zmiana sprzedaży %",
+    "curr_qty": "Ilość tygodnia (szt.)",
+    "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
+    "qty_change_pct": "Zmiana ilości %",
+    "status": "Status zmiany",
+}
+
+ORDER_DISPLAY = [
+    "SKU",
+    "Produkt",
+    "Sprzedaż tygodnia (PLN)",
+    "Sprzedaż poprzedniego tygodnia (PLN)",
+    "Zmiana sprzedaży %",
+    "Ilość tygodnia (szt.)",
+    "Ilość poprzedniego tygodnia (szt.)",
+    "Zmiana ilości %",
+    "Status zmiany",
+]
+
+def to_display(df_in: pd.DataFrame) -> pd.DataFrame:
+    out = df_in.rename(columns=COLS_DISPLAY)
+    # zachowaj tylko kolumny zdefiniowane do wyświetlenia, jeśli istnieją
+    keep = [c for c in ORDER_DISPLAY if c in out.columns]
+    return out[keep]
+
+# Wzrosty / Spadki z faktycznymi nazwami
 ups = df_top[df_top["rev_change_pct"] >= threshold].copy()
 downs = df_top[df_top["rev_change_pct"] <= -threshold].copy()
+
 colA, colB = st.columns(2)
 with colA:
-    st.markdown("### 🚀 Wzrosty")
+    st.markdown("### 🚀 Wzrosty (≥ próg)")
     if ups.empty:
         st.info("Brak pozycji przekraczających próg wzrostu.")
     else:
         st.dataframe(
-            ups.rename(columns={
-                "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
-                "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
-                "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
-            }),
+            to_display(ups),
             use_container_width=True
         )
 with colB:
-    st.markdown("### 📉 Spadki")
+    st.markdown("### 📉 Spadki (≤ -próg)")
     if downs.empty:
         st.info("Brak pozycji przekraczających próg spadku.")
     else:
         st.dataframe(
-            downs.rename(columns={
-                "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
-                "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
-                "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
-            }),
+            to_display(downs),
             use_container_width=True
         )
 
-# Podgląd danych (opcjonalnie)
-with st.expander("🔎 Podgląd danych"):
-    st.dataframe(df_top, use_container_width=True)
+# Podgląd TOP10 (z faktycznymi nazwami)
+with st.expander("🔎 Podgląd TOP 10 (tabela)"):
+    st.dataframe(to_display(df_top), use_container_width=True)
