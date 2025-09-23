@@ -214,41 +214,87 @@ LIMIT 100;
 """
 
 @st.cache_data(ttl=600)
-def query_wow_top10(week_start_iso: str) -> pd.DataFrame:
-    if not session_id:
-        return pd.DataFrame()
+def _dataset_call(sql_text: str, params: dict, session: str) -> dict:
+    """Surowe wywołanie /api/dataset (zwraca JSON Metabase)."""
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
         "native": {
-            "query": SQL_WOW_TOP10,
-            "template-tags": {"week_start": {"name": "week_start", "display-name": "week_start", "type": "date"}},
+            "query": sql_text,
+            "template-tags": {k: {"name": k, "display-name": k, "type": "date"} for k in params.keys()},
         },
-        "parameters": [{"type": "date", "target": ["variable", ["template-tag", "week_start"]], "value": week_start_iso}],
+        "parameters": [
+            {"type": "date", "target": ["variable", ["template-tag", k]], "value": v}
+            for k, v in params.items()
+        ],
     }
+    r = requests.post(f"{METABASE_URL}/api/dataset",
+                      headers={"X-Metabase-Session": session},
+                      json=payload, timeout=120)
+    # Nie r.raise_for_status() – sami obsłużymy 401/ inne
+    return {"status": r.status_code, "json": (r.json() if r.content else None), "text": r.text}
+
+def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
+    """Robust parser + auto-refresh sesji + anty-cache na zmianę SQL."""
+    # 1) Sesja
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+
+    # 2) Pierwsze podejście
+    res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+    if res["status"] == 401:
+        # odśwież sesję i spróbuj raz jeszcze
+        st.cache_data.clear()  # zbij cache _dataset_call z nieaktualną sesją
+        session = get_metabase_session()
+        if not session:
+            st.error("❌ Nie udało się odświeżyć sesji Metabase.")
+            return pd.DataFrame()
+        res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+
+    # Debug (opcjonalnie pokażemy w UI)
+    st.session_state["mb_last_status"] = res["status"]
+    st.session_state["mb_last_json"] = res["json"]
+
+    if res["status"] != 200 or not res["json"]:
+        st.error(f"❌ Metabase HTTP {res['status']}: {res.get('text','')[:300]}")
+        return pd.DataFrame()
+
+    j = res["json"]
+
+    # 3) Parsowanie różnych formatów odpowiedzi
+    df = None
     try:
-        r = requests.post(f"{METABASE_URL}/api/dataset", headers=headers, json=payload, timeout=120)
-        r.raise_for_status()
-        j = r.json()
-        if isinstance(j, dict) and "data" in j and "rows" in j["data"]:
-            cols = [c.get("name") for c in j["data"].get("cols", [])]
-            rows = j["data"]["rows"]
-            df = pd.DataFrame([[row[i] for i in range(len(cols))] for row in rows], columns=cols)
-        else:
+        if isinstance(j, dict) and "data" in j and isinstance(j["data"], dict):
+            cols_meta = j["data"].get("cols", [])
+            # preferuj 'name', jeśli brak – 'display_name'
+            col_names = []
+            for i, c in enumerate(cols_meta):
+                name = c.get("name") or c.get("display_name") or f"col_{i}"
+                col_names.append(name)
+            rows = j["data"].get("rows", [])
+            if rows and isinstance(rows[0], dict):
+                df = pd.DataFrame(rows)  # czasem MB zwraca listę dictów
+            else:
+                df = pd.DataFrame([[row[i] for i in range(len(col_names))] for row in rows], columns=col_names)
+        elif isinstance(j, list):
             df = pd.DataFrame(j)
-        # typy liczbowe
-        for col in ["curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty", "qty_change_pct"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
-    except requests.HTTPError as err:
-        body = getattr(err, "response", None)
-        body_txt = (body.text[:300] if body is not None and hasattr(body, "text") else "")
-        st.error(f"❌ Błąd HTTP Metabase: {err} | {body_txt}")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"❌ Błąd pobierania WoW: {e}")
-        return pd.DataFrame()
+        st.error(f"❌ Błąd parsowania odpowiedzi Metabase: {e}")
+        df = pd.DataFrame()
+
+    if df is None:
+        df = pd.DataFrame()
+
+    # 4) Ujednolicenie nazw kolumn (lowercase, bez spacji)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    # 5) Konwersje typów (jeśli kolumny istnieją pod innymi “case’ami” – już mamy lowercase)
+    for col in ["curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty", "qty_change_pct"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
 
 def last_completed_week_start(today_pl: date | None = None) -> date:
     if today_pl is None:
@@ -260,87 +306,84 @@ def render_wow_top10():
     st.sidebar.header("🔎 Filtry (sprzedaż)")
     default_week = last_completed_week_start()
     pick_day = st.sidebar.date_input("Wybierz tydzień (dowolny dzień tego tygodnia)", value=default_week)
-    # wyznacz poniedziałek tygodnia wybranego dnia
     week_start = pick_day - timedelta(days=pick_day.weekday())
     threshold = st.sidebar.slider("Próg alertu (±%)", min_value=5, max_value=80, value=20, step=5)
+    debug_api = st.sidebar.toggle("Debug API", value=False)
 
     week_end = week_start + timedelta(days=7)
-    st.header("🛒 Sprzedaż — WoW TOP 10 SKU")
+    st.header("🛒 Sprzedaż — WoW TOP 10 SKU (PLN)")
     st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  | Alert: ±{threshold}%  (Europe/Warsaw)")
 
-    df = query_wow_top10(week_start.isoformat())
+    # ⬇️ NOWE wywołanie (przekazujemy SQL jako argument)
+    df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
+
+    if debug_api:
+        st.write(f"HTTP: {st.session_state.get('mb_last_status')}")
+        st.subheader("Raw JSON (Metabase)")
+        st.json(st.session_state.get("mb_last_json"))
+        st.subheader("DataFrame (head)")
+        st.dataframe(df.head(20), use_container_width=True)
+
     if df.empty:
-        st.warning("Brak danych dla wybranego tygodnia. Zmień tydzień lub sprawdź schemat SQL (tabela linii zamówień).")
+        st.warning("Brak danych dla wybranego tygodnia (PLN). Zmień tydzień lub sprawdź filtry.")
         return
 
-    # TOP 10 po bieżącym tygodniu (revenue)
+    # Upewnij się, że oczekiwane kolumny istnieją po normalizacji:
+    need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct"}
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        st.error(f"Brak kolumn w danych: {missing}. Sprawdź aliasy w SQL i parser.")
+        st.dataframe(df.head(), use_container_width=True)
+        return
+
     df_top = df.sort_values("curr_rev", ascending=False).head(10).copy()
-    # kategorie do kolorowania (wzrost/spadek/neutral)
     def cat(p):
         if pd.isna(p): return "n/d"
         if p >= threshold: return f"↑ ≥{threshold}%"
         if p <= -threshold: return f"↓ ≤-{threshold}%"
         return "≈"
-
     df_top["status"] = df_top["rev_change_pct"].apply(cat)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Suma rev (tydzień)", f"{df['curr_rev'].sum():,.0f} zł".replace(",", " "))
-    c2.metric("Zmiana vs poprzedni", f"{(df['curr_rev'].sum() - df['prev_rev'].sum()):,.0f} zł".replace(",", " "))
-    try:
-        pct_total = (df['curr_rev'].sum() - df['prev_rev'].sum()) / df['prev_rev'].sum() * 100 if df['prev_rev'].sum() else 0
-    except ZeroDivisionError:
-        pct_total = 0
-    c3.metric("Δ% całości", f"{pct_total:+.0f}%")
+    sum_curr = float(df["curr_rev"].sum() or 0)
+    sum_prev = float(df["prev_rev"].sum() or 0)
+    delta_abs = sum_curr - sum_prev
+    delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
+    c1.metric("Suma rev (tydz., PLN)", f"{sum_curr:,.0f}".replace(",", " "))
+    c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f}".replace(",", " "))
+    c3.metric("Δ% całości", f"{delta_pct:+.0f}%")
 
-    st.subheader("TOP 10 (wartość tygodnia)")
+    st.subheader("TOP 10 (wartość tygodnia, PLN)")
     fig = px.bar(
-        df_top,
-        x="curr_rev", y="sku",
-        color="status",
-        color_discrete_map={"↑ ≥20%": "#2ca02c", "↑ ≥25%": "#2ca02c", "↑ ≥30%": "#2ca02c",
-                            "↓ ≤-20%": "#d62728", "↓ ≤-25%": "#d62728", "↓ ≤-30%": "#d62728",
-                            "≈": "#1f77b4", "n/d": "#7f7f7f"},
-        hover_data={"product_name": True, "prev_rev": ":,.0f", "rev_change_pct": ":.0f"},
-        labels={"curr_rev": "Rev (tydzień)", "sku": "SKU"},
+        df_top, x="curr_rev", y="sku", color="status",
+        color_discrete_map={"≈": "#1f77b4", "n/d": "#7f7f7f"},
+        labels={"curr_rev": "Rev (tydzień, PLN)", "sku": "SKU"},
         orientation="h", height=600
     )
     fig.update_layout(yaxis={"categoryorder": "total ascending"})
     st.plotly_chart(fig, use_container_width=True)
 
-    # Alerty
     ups = df_top[df_top["rev_change_pct"] >= threshold].copy()
     downs = df_top[df_top["rev_change_pct"] <= -threshold].copy()
-
     colA, colB = st.columns(2)
     with colA:
         st.markdown("### 🚀 Wzrosty")
-        if ups.empty:
-            st.info("Brak pozycji ≥ próg.")
-        else:
-            ups_view = ups[["sku", "product_name", "curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty"]]
-            ups_view = ups_view.rename(columns={
-                "sku": "SKU", "product_name": "Produkt",
-                "curr_rev": "Rev (tydz.)", "prev_rev": "Rev (poprz.)",
-                "rev_change_pct": "Δ Rev %", "curr_qty": "Qty (tydz.)", "prev_qty": "Qty (poprz.)"
-            })
-            st.dataframe(ups_view, use_container_width=True)
-
+        st.dataframe(
+            ups.rename(columns={
+                "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
+                "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
+                "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
+            }),
+            use_container_width=True)
     with colB:
         st.markdown("### 📉 Spadki")
-        if downs.empty:
-            st.info("Brak pozycji ≤ -próg.")
-        else:
-            downs_view = downs[["sku", "product_name", "curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty"]]
-            downs_view = downs_view.rename(columns={
-                "sku": "SKU", "product_name": "Produkt",
-                "curr_rev": "Rev (tydz.)", "prev_rev": "Rev (poprz.)",
-                "rev_change_pct": "Δ Rev %", "curr_qty": "Qty (tydz.)", "prev_qty": "Qty (poprz.)"
-            })
-            st.dataframe(downs_view, use_container_width=True)
-
-    with st.expander("Podgląd danych (TOP 10)"):
-        st.dataframe(df_top, use_container_width=True)
+        st.dataframe(
+            downs.rename(columns={
+                "sku":"SKU","product_name":"Produkt","curr_rev":"Rev (tydz., PLN)",
+                "prev_rev":"Rev (poprz., PLN)","rev_change_pct":"Δ Rev %",
+                "curr_qty":"Qty (tydz.)","prev_qty":"Qty (poprz.)"
+            }),
+            use_container_width=True)
 
 # ─────────────────────────────────────────────────────────────
 # Router widoków
