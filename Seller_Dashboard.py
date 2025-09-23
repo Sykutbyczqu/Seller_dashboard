@@ -1,4 +1,5 @@
 # streamlit_app.py
+import io
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -6,14 +7,17 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Sprzedaż: WoW TOP 10 (PLN)", layout="wide")
-st.title("🛒 Sprzedaż — Tydzień do tygodnia (TOP 10 SKU, PLN)")
+st.set_page_config(page_title="Sprzedaż: WoW TOP (PLN) — Rozszerzone", layout="wide")
+st.title("🛒 Sprzedaż — Trendy i TOP N (PLN)")
 
 # ─────────────────────────────────────────────────────────────
 # 2) Ustawienia Metabase
@@ -25,7 +29,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL — tylko PLN (filtr po l.currency_id → res_currency.name = 'PLN')
+# 3) SQL — (używamy tu tego samego zapytania jak wcześniej — wyfiltrowane do PLN)
 # ─────────────────────────────────────────────────────────────
 SQL_WOW_TOP10 = """
 WITH params AS (
@@ -227,7 +231,7 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
     return df
 
 # ─────────────────────────────────────────────────────────────
-# 8) UI: wybór tygodnia, próg alertu, panel debug
+# 8) UI: wybór tygodnia, progi, trend weeks, TOP N, debug
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
     """Poniedziałek ostatniego zakończonego tygodnia (Mon)."""
@@ -240,13 +244,21 @@ default_week = last_completed_week_start()
 pick_day = st.sidebar.date_input("Wybierz tydzień (podaj dowolny dzień z tego tygodnia)", value=default_week)
 week_start = pick_day - timedelta(days=pick_day.weekday())
 week_end = week_start + timedelta(days=7)
-threshold = st.sidebar.slider("Próg alertu (±%)", min_value=5, max_value=80, value=20, step=5)
+
+# oddzielne progi
+threshold_rev = st.sidebar.slider("Próg alertu — wartość sprzedaży (%)", min_value=5, max_value=200, value=20, step=5)
+threshold_qty = st.sidebar.slider("Próg alertu — ilość (%)", min_value=5, max_value=200, value=20, step=5)
+
+# trend ustawienia
+weeks_back = st.sidebar.slider("Ile tygodni wstecz (trend)", 4, 16, 8, step=1)
+top_n = st.sidebar.slider("Ile pozycji w TOP?", 5, 20, 10, step=5)
+
 debug_api = st.sidebar.toggle("Debug API", value=False)
 
 st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 9) Pobranie danych i prezentacja (z polskimi nazwami kolumn)
+# 9) Pobranie danych dla wybranego tygodnia (główny snapshot)
 # ─────────────────────────────────────────────────────────────
 df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
 
@@ -267,39 +279,150 @@ if missing:
     st.dataframe(df.head(), use_container_width=True)
     st.stop()
 
-# Ranking TOP 10
-df_top = df.sort_values("curr_rev", ascending=False).head(10).copy()
+# Ranking TOP N
+df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
 
-def classify_change(pct: float | np.floating | None) -> str:
-    if pd.isna(pct): return "n/d"
-    if pct >= threshold: return f"↑ ≥{threshold}%"
-    if pct <= -threshold: return f"↓ ≤-{threshold}%"
-    return "≈"
+# ─────────────────────────────────────────────────────────────
+# 10) Funkcje pomocnicze: klasyfikacja, ikonki, formatowanie
+# ─────────────────────────────────────────────────────────────
+def classify_change_symbol(pct: float | np.floating | None, threshold: float) -> str:
+    """Zwraca ikonę i przybliżoną grubość (tekstowo) - używamy Unicode."""
+    if pd.isna(pct): return "—"
+    if pct >= threshold:
+        # im większy % tym silniejsza ikona — mapujemy do trzech stopni
+        if pct >= threshold * 4: return "🟢⬆️⬆️"
+        if pct >= threshold * 2: return "🟢⬆️"
+        return "🟢↑"
+    if pct <= -threshold:
+        if pct <= -threshold * 4: return "🔴⬇️⬇️"
+        if pct <= -threshold * 2: return "🔴⬇️"
+        return "🔴↓"
+    return "⚪≈"
 
-df_top["status"] = df_top["rev_change_pct"].apply(classify_change)
+def pct_fmt(x):
+    if pd.isna(x): return "n/d"
+    return f"{x:+.0f}%"
 
-# KPI całościowe
+df_top["status_rev"] = df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev))
+df_top["status_qty"] = df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty))
+
+# ─────────────────────────────────────────────────────────────
+# 11) KPI całkowite (plus sticky CSS)
+# ─────────────────────────────────────────────────────────────
 sum_curr = float(df["curr_rev"].sum() or 0)
 sum_prev = float(df["prev_rev"].sum() or 0)
 delta_abs = sum_curr - sum_prev
 delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
 
+# sticky CSS
+st.markdown("""
+    <style>
+    .sticky-kpi {
+      position: sticky;
+      top: 70px;
+      background-color: white;
+      padding: 8px;
+      z-index: 999;
+      border-bottom: 1px solid rgba(0,0,0,0.06);
+    }
+    .kpi-small { font-size:12px; color: #666; }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
 c1, c2, c3 = st.columns(3)
 c1.metric("Suma sprzedaży (PLN, tydzień)", f"{sum_curr:,.0f} zł".replace(",", " "))
 c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f} zł".replace(",", " "))
 c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# Wykres TOP10 — etykiety PL
-st.subheader("TOP 10 — Sprzedaż tygodnia (PLN)")
+# ─────────────────────────────────────────────────────────────
+# 12) Wykres TOPN (słupkowy) z kolorami statusów — używamy ikon w hover
+# ─────────────────────────────────────────────────────────────
+st.subheader(f"TOP {top_n} — Sprzedaż tygodnia (PLN)")
+# Przygotuj etykiety hover
+df_top["hover"] = df_top.apply(lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} zł<br>Zmiana: {pct_fmt(r.rev_change_pct)}", axis=1)
 fig = px.bar(
-    df_top, x="curr_rev", y="sku", color="status",
-    labels={"curr_rev": "Sprzedaż tygodnia (PLN)", "sku": "SKU", "status": "Status zmiany"},
-    orientation="h", height=600
+    df_top, x="curr_rev", y="sku", color="status_rev",
+    labels={"curr_rev": "Sprzedaż tygodnia (PLN)", "sku": "SKU", "status_rev": "Status zmiany"},
+    orientation="h", height=520, hover_data=["hover"]
 )
-fig.update_layout(yaxis={"categoryorder": "total ascending"})
+fig.update_traces(hovertemplate="%{customdata[0]}<extra></extra>")
+fig.update_layout(yaxis={"categoryorder": "total ascending"}, showlegend=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# Słownik faktycznych nazw do tabel
+# ─────────────────────────────────────────────────────────────
+# 13) Wykres wodospadowy (waterfall) — wkład w delta całkowity
+# ─────────────────────────────────────────────────────────────
+st.subheader("📊 Wkład TOP produktów w zmianę sprzedaży (waterfall)")
+df_delta = df_top.copy()
+df_delta["delta"] = df_delta["curr_rev"] - df_delta["prev_rev"]
+# posortuj po absolutnej wartości wkładu malejąco
+df_delta = df_delta.sort_values("delta", ascending=False).reset_index(drop=True)
+
+# build waterfall data - measures = 'relative' dla każdego, a na końcu total
+measures = ["relative"] * len(df_delta) + ["total"]
+x = df_delta["sku"].tolist() + ["SUMA"]
+y = df_delta["delta"].tolist() + [df_delta["delta"].sum()]
+
+fig_wf = go.Figure(go.Waterfall(
+    name="Wkład",
+    orientation="v",
+    measure=measures,
+    x=x,
+    y=y,
+    textposition="outside",
+    decreasing={"marker":{"color":"#ef5350"}},
+    increasing={"marker":{"color":"#66bb6a"}},
+    totals={"marker":{"color":"#42a5f5"}},
+))
+fig_wf.update_layout(title="Wkład produktów w zmianę sprzedaży (PLN)")
+st.plotly_chart(fig_wf, use_container_width=True, height=420)
+
+# ─────────────────────────────────────────────────────────────
+# 14) Trend: pobieranie wielu tygodni i wykres area/line dla wybranych SKU
+# ─────────────────────────────────────────────────────────────
+st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy")
+
+@st.cache_data(ttl=600)
+def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8) -> pd.DataFrame:
+    """Pobiera snapshot dla każdego tygodnia (week_start) - zwraca z kolumną week_start."""
+    frames = []
+    for i in range(weeks):
+        ws_date = week_start_date - timedelta(weeks=i)
+        iso = ws_date.isoformat()
+        df_i = query_wow_top10(sql_text, iso)
+        if df_i is None or df_i.empty:
+            continue
+        df_i = df_i.copy()
+        df_i["week_start"] = pd.to_datetime(ws_date)
+        frames.append(df_i)
+    if frames:
+        all_df = pd.concat(frames, ignore_index=True)
+        # uzupełnij brakujące sku-week komórki zerami
+        return all_df
+    return pd.DataFrame()
+
+df_trend = query_trend_many_weeks(SQL_WOW_TOP10, week_start, weeks=weeks_back)
+
+if df_trend.empty:
+    st.info("Brak danych trendu (dla wybranej liczby tygodni).")
+else:
+    # possible SKUs do wyboru: topN obecnego tygodnia uzupełnione o najczęstsze w trendzie
+    candidates = pd.concat([df_top["sku"], df_trend["sku"].value_counts().head(30).index.to_series()]).unique().tolist()
+    pick_skus = st.multiselect("Wybierz SKU do analizy trendu", options=candidates, default=candidates[:3])
+    if pick_skus:
+        df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
+        # agreguj, aby mieć total per week per sku
+        df_plot = df_plot.groupby(["week_start","sku"])["curr_rev"].sum().reset_index()
+        fig_tr = px.area(df_plot, x="week_start", y="curr_rev", color="sku", line_group="sku", markers=True,
+                         labels={"curr_rev":"Sprzedaż (PLN)", "week_start":"Tydzień"})
+        fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"))
+        st.plotly_chart(fig_tr, use_container_width=True, height=520)
+
+# ─────────────────────────────────────────────────────────────
+# 15) Sekcja wzrosty/spadki z faktycznymi nazwami i ikonami
+# ─────────────────────────────────────────────────────────────
 COLS_DISPLAY = {
     "sku": "SKU",
     "product_name": "Produkt",
@@ -307,53 +430,4 @@ COLS_DISPLAY = {
     "prev_rev": "Sprzedaż poprzedniego tygodnia (PLN)",
     "rev_change_pct": "Zmiana sprzedaży %",
     "curr_qty": "Ilość tygodnia (szt.)",
-    "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
-    "qty_change_pct": "Zmiana ilości %",
-    "status": "Status zmiany",
-}
-
-ORDER_DISPLAY = [
-    "SKU",
-    "Produkt",
-    "Sprzedaż tygodnia (PLN)",
-    "Sprzedaż poprzedniego tygodnia (PLN)",
-    "Zmiana sprzedaży %",
-    "Ilość tygodnia (szt.)",
-    "Ilość poprzedniego tygodnia (szt.)",
-    "Zmiana ilości %",
-    "Status zmiany",
-]
-
-def to_display(df_in: pd.DataFrame) -> pd.DataFrame:
-    out = df_in.rename(columns=COLS_DISPLAY)
-    # zachowaj tylko kolumny zdefiniowane do wyświetlenia, jeśli istnieją
-    keep = [c for c in ORDER_DISPLAY if c in out.columns]
-    return out[keep]
-
-# Wzrosty / Spadki z faktycznymi nazwami
-ups = df_top[df_top["rev_change_pct"] >= threshold].copy()
-downs = df_top[df_top["rev_change_pct"] <= -threshold].copy()
-
-colA, colB = st.columns(2)
-with colA:
-    st.markdown("### 🚀 Wzrosty (≥ próg)")
-    if ups.empty:
-        st.info("Brak pozycji przekraczających próg wzrostu.")
-    else:
-        st.dataframe(
-            to_display(ups),
-            use_container_width=True
-        )
-with colB:
-    st.markdown("### 📉 Spadki (≤ -próg)")
-    if downs.empty:
-        st.info("Brak pozycji przekraczających próg spadku.")
-    else:
-        st.dataframe(
-            to_display(downs),
-            use_container_width=True
-        )
-
-# Podgląd TOP10 (z faktycznymi nazwami)
-with st.expander("🔎 Podgląd TOP 10 (tabela)"):
-    st.dataframe(to_display(df_top), use_container_width=True)
+    "prev_qty": "Ilość poprzedniego tygod_
