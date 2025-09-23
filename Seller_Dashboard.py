@@ -93,7 +93,6 @@ SELECT
 FROM curr c
 LEFT JOIN prev p ON p.sku = c.sku
 ORDER BY c.curr_rev DESC
-LIMIT 100;
 """
 
 # ─────────────────────────────────────────────────────────────
