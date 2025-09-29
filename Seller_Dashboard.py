@@ -18,7 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 st.set_page_config(page_title="Sprzedaż: WoW TOP (Allegro.pl / eBay.de) — Rozszerzone", layout="wide")
 st.title("🛒 Sprzedaż — Trendy i TOP N (Allegro.pl / eBay.de)")
 
-# Globalny config dla Plotly (używamy WYŁĄCZNIE parametru `config=...` w st.plotly_chart)
+# Globalny config dla Plotly (zamiast przekazywania pojedynczych opcji jako kwargs)
 PLOTLY_CONFIG = {
     "displaylogo": False,
     "modeBarButtonsToRemove": [
@@ -30,7 +30,7 @@ PLOTLY_CONFIG = {
 }
 
 # ─────────────────────────────────────────────────────────────
-# 2) Ustawienia Metabase
+# 2) Ustawienia Metabase (przykładowe - w runtime użyj st.secrets)
 # ─────────────────────────────────────────────────────────────
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
 METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))
@@ -39,7 +39,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL (snapshot + trend jednorazowy)
+# 3) SQL queries dla różnych platform (snapshot + trend)
 # ─────────────────────────────────────────────────────────────
 SQL_ALLEGRO_PLN = """
 WITH params AS (
@@ -177,6 +177,7 @@ LEFT JOIN prev p ON p.sku = c.sku
 ORDER BY c.curr_rev DESC
 """
 
+# Nowe: trend w 1 zapytaniu (zakres tygodni)
 SQL_ALLEGRO_TREND = """
 WITH params AS (
   SELECT
@@ -268,7 +269,7 @@ ORDER BY w.week_start ASC, curr_rev DESC;
 """
 
 # ─────────────────────────────────────────────────────────────
-# 4) Metabase session + HTTP pooling
+# 4) Metabase session (cache) + HTTP pooling
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=50 * 60)
 def get_metabase_session() -> str | None:
@@ -442,7 +443,7 @@ def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int,
     return df
 
 # ─────────────────────────────────────────────────────────────
-# 8) Pomocnicze funkcje
+# 8) Pomocnicze funkcje (nie zmieniają się w logice)
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
     d = today or datetime.now(TZ).date()
@@ -461,7 +462,7 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         return ("🔴↓", "#ef5350")
     return ("⚪≈", "#9e9e9e")
 
-# Fallback (nieużywany domyślnie)
+# Fallback (stare wielokrotne zapytania)
 @st.cache_data(ttl=600)
 def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
     frames = []
@@ -503,7 +504,7 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     return buf.read()
 
 # ─────────────────────────────────────────────────────────────
-# 9) Render platformy
+# 9) Funkcja do renderowania zawartości zakładki
 # ─────────────────────────────────────────────────────────────
 def render_platform_analysis(platform_name: str, sql_query: str, currency: str, platform_key: str, sql_query_trend: str | None = None):
     st.sidebar.header(f"🔎 Filtry ({platform_name})")
@@ -581,8 +582,8 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         hoverinfo="text",
         hovertext=hover
     ))
-    fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150), autosize=True)
-    st.plotly_chart(fig, config=PLOTLY_CONFIG)  # ← tylko config
+    fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150))
+    st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
     # Waterfall
     st.subheader(f"📊 Wkład TOP produktów w zmianę sprzedaży (waterfall) - {currency}")
@@ -606,18 +607,16 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         decreasing=dict(marker=dict(color="#ef5350")),
         totals=dict(marker=dict(color="#42a5f5"))
     )
-    fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False, height=520, autosize=True)
-    st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)  # ← tylko config
+    fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False)
+    st.plotly_chart(fig_wf, width='stretch', config=PLOTLY_CONFIG)
 
-    # Trend tygodniowy
     # Trend tygodniowy
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
-    df_trend = (
-        query_platform_trend(sql_query_trend, week_start, weeks=weeks_back, platform_key=platform_key)
-        if sql_query_trend else
-        query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
-    )
+    if sql_query_trend:
+        df_trend = query_platform_trend(sql_query_trend, week_start, weeks=weeks_back, platform_key=platform_key)
+    else:
+        df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
 
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
@@ -625,8 +624,10 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
 
         search_term = st.text_input(f"Szukaj SKU lub produktu - {platform_name}", "", key=f"search_{platform_key}")
-        filtered_skus = [sku for sku in all_skus if
-                         search_term.lower() in str(sku).lower()] if search_term else all_skus
+        if search_term:
+            filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()]
+        else:
+            filtered_skus = all_skus
 
         pick_skus = st.multiselect(
             f"Wybierz SKU do analizy trendu - {platform_name}",
@@ -639,63 +640,19 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                               key=f"chart_{platform_key}")
 
         if pick_skus:
-            # 1) Sumujemy wartość i ilość per tydzień i SKU
-            df_plot = (
-                df_trend[df_trend["sku"].isin(pick_skus)]
-                .groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]]
-                .sum()
-            )
+            df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
+            df_plot = df_plot.groupby(["week_start", "sku"])["curr_rev"].sum().reset_index()
+            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
 
-            # 2) Ujednolicamy typ: week_start -> date (ważne dla reindex)
-            df_plot["week_start"] = pd.to_datetime(df_plot["week_start"]).dt.date
-
-            # 3) Pełna oś tygodni (poniedziałki) z zakresu slidera, jako list[date]
-            full_weeks = [(week_start - timedelta(weeks=i)) for i in range(weeks_back - 1, -1, -1)]
-
-            # 4) Pivot + reindex do pełnej osi z zerami
-            rev_pv = (
-                df_plot.pivot(index="week_start", columns="sku", values="curr_rev")
-                .reindex(full_weeks, fill_value=0)
-            )
-            qty_pv = (
-                df_plot.pivot(index="week_start", columns="sku", values="curr_qty")
-                .reindex(full_weeks, fill_value=0)
-            )
-
-            # 5) Wykres z tooltipem pokazującym ilość sztuk
             fig_tr = go.Figure()
-            currency_symbol = "zł" if currency == "PLN" else "€"
-            x_vals = pd.to_datetime(rev_pv.index)  # na osi X chcemy datetime
-
-            for sku in rev_pv.columns:
-                yvals = rev_pv[sku].values
-                qvals = qty_pv[sku].values
-                common = dict(
-                    x=x_vals,
-                    y=yvals,
-                    name=sku,
-                    customdata=np.stack([qvals], axis=-1),
-                    hovertemplate=(
-                        "<b>%{fullData.name}</b><br>"
-                        "%{x|%Y-%m-%d}<br>"
-                        f"Sprzedaż: %{{y:,.0f}} {currency_symbol}<br>"
-                        "Ilość: %{customdata[0]:,.0f}"
-                        "<extra></extra>"
-                    )
-                )
+            for sku in pv.columns:
+                yvals = pv[sku].values
                 if chart_type == "area":
-                    fig_tr.add_trace(go.Scatter(mode="lines", stackgroup="one", **common))
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines", name=sku, stackgroup="one"))
                 else:
-                    fig_tr.add_trace(go.Scatter(mode="lines+markers", **common))
-
-            fig_tr.update_layout(
-                xaxis=dict(tickformat="%Y-%m-%d"),
-                yaxis_title=f"Sprzedaż ({currency})",
-                height=520,
-                autosize=True,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-            )
-            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
+            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520)
+            st.plotly_chart(fig_tr, width='stretch', config=PLOTLY_CONFIG)
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
@@ -738,6 +695,32 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
 
     with st.expander("🔎 Podgląd TOP (tabela)"):
         st.dataframe(to_display(df_top), width='stretch', hide_index=True)
+
+    # Eksport danych
+    st.subheader("📥 Eksport danych")
+    download_col1, download_col2, download_col3 = st.columns(3)
+
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    download_col1.download_button(f"📥 Pobierz (CSV) - {platform_name}", csv_bytes, f"sprzedaz_{platform_key}.csv",
+                                  "text/csv")
+
+    excel_bytes = to_excel_bytes(df)
+    download_col2.download_button(f"📥 Pobierz (Excel) - {platform_name}", excel_bytes, f"sprzedaz_{platform_key}.xlsx",
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    pdf_bytes = df_to_pdf_bytes(to_display(df_top), title=f"TOP{top_n} - raport tygodniowy - {platform_name}")
+    download_col3.download_button(f"📥 Pobierz (PDF) — TOP - {platform_name}", pdf_bytes,
+                                  f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
+
+    # Panel QA / Debug
+    with st.expander(f"🔧 Panel QA / Debug - {platform_name}"):
+        st.write("Metabase HTTP:", st.session_state.get(f"mb_last_status_{platform_key}"))
+        st.write("Liczba wierszy (snapshot):", len(df))
+        st.write("Liczba SKU w snapshot:", df["sku"].nunique())
+        st.write("SKU bez nazwy:", df[df["product_name"].isna()]["sku"].unique().tolist())
+        if debug_api:
+            st.subheader("Raw JSON (Metabase)")
+            st.json(st.session_state.get(f"mb_last_json_{platform_key}"))
 
 # ─────────────────────────────────────────────────────────────
 # 10) Główna aplikacja z zakładkami
