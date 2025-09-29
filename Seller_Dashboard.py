@@ -639,39 +639,35 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                               key=f"chart_{platform_key}")
 
         if pick_skus:
-            # 1) Sumujemy wartość i ilość per tydzień i SKU
+            # 1) sumuj wartość i ilość per tydzień i SKU
             df_plot = (
                 df_trend[df_trend["sku"].isin(pick_skus)]
                 .groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]]
                 .sum()
             )
 
-            # 2) Budujemy pełną oś tygodni (poniedziałki) wg slidera
-            full_weeks = pd.date_range(
-                start=week_start - timedelta(weeks=weeks_back - 1),
-                end=week_start,
-                freq="W-MON"  # poniedziałek
-            )
+            # 2) UJEDNOLICENIE TYPÓW: wszystko do `date`
+            df_plot["week_start"] = pd.to_datetime(df_plot["week_start"]).dt.date
 
-            # 3) Pivot + reindex (wypełniamy brakujące tygodnie zerami) — identycznie dla Allegro i eBay
-            rev_pv = (
-                df_plot.pivot(index="week_start", columns="sku", values="curr_rev")
-                .reindex(full_weeks, fill_value=0)
-            )
-            qty_pv = (
-                df_plot.pivot(index="week_start", columns="sku", values="curr_qty")
-                .reindex(full_weeks, fill_value=0)
-            )
+            # 3) Pełna oś poniedziałków jako `date` (ostatnie N tygodni)
+            full_weeks = [(week_start - timedelta(weeks=i)) for i in range(weeks_back - 1, -1, -1)]  # list[date]
 
-            # 4) Wykres z tooltipem pokazującym ilość sztuk
+            # 4) Pivot + reindex do pełnej osi (zerujemy braki)
+            rev_pv = (df_plot.pivot(index="week_start", columns="sku", values="curr_rev")
+                      .reindex(full_weeks, fill_value=0))
+            qty_pv = (df_plot.pivot(index="week_start", columns="sku", values="curr_qty")
+                      .reindex(full_weeks, fill_value=0))
+
+            # 5) Rysunek + tooltip z ilością sztuk
             fig_tr = go.Figure()
             currency_symbol = "zł" if currency == "PLN" else "€"
+            x_vals = pd.to_datetime(rev_pv.index)  # zamieniamy date→datetime tylko do osi X
 
             for sku in rev_pv.columns:
                 yvals = rev_pv[sku].values
                 qvals = qty_pv[sku].values
                 common = dict(
-                    x=rev_pv.index,
+                    x=x_vals,
                     y=yvals,
                     name=sku,
                     customdata=np.stack([qvals], axis=-1),
@@ -695,7 +691,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                 autosize=True,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
             )
-            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)  # tylko config — bez deprecated kwargs
+            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
