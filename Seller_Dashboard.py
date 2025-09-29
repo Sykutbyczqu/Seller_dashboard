@@ -1032,7 +1032,7 @@ def render_platform(platform_key: str,
 def render_poland_map(week_start: date):
     st.header("🗺️ Sprzedaż wg województw (na podstawie ZIP)")
 
-    # Pobierz zagregowane dane województw
+    # ETAP 1: Pobierz zagregowane dane województw (mało wierszy)
     df_regions = query_snapshot(SQL_WOW_POLAND_REGION_ONLY, week_start.isoformat())
 
     if df_regions.empty:
@@ -1046,31 +1046,38 @@ def render_poland_map(week_start: date):
     region_totals = df_regions.groupby("region", as_index=False)["revenue"].sum().rename(
         columns={"revenue": "region_total"})
 
-    st.success(f"✅ Suma: {region_totals['region_total'].sum():,.0f} zł | Województw: {len(region_totals)}")
+    # KPI
+    st.metric("Łączna sprzedaż (wszystkie regiony)", f"{region_totals['region_total'].sum():,.0f} zł".replace(",", " "))
 
-    # Pobierz TOP produkty (ograniczone do 10 na województwo = max ~160 wierszy)
+    # ETAP 2: Pobierz TOP produkty (TOP 10 na województwo)
     df_products = query_snapshot(SQL_WOW_POLAND_TOP_PRODUCTS, week_start.isoformat())
 
     if not df_products.empty:
         df_products["region"] = df_products["zip_prefix"].map(ZIP_TO_REGION)
         df_products = df_products.dropna(subset=["region"])
 
-        # Przygotuj tooltips
+        # Przygotuj tooltips z TOP produktami
         hover_text = {}
         for region, sub in df_products.groupby("region"):
-            lines = [f"<b>{region}</b><br>"]
-            for i, (_, row) in enumerate(sub.head(5).iterrows(), 1):
-                lines.append(f"{i}. {row['sku']}: {row['revenue']:,.0f} zł")
+            sub_sorted = sub.sort_values("revenue", ascending=False)
+            total = region_totals[region_totals["region"] == region]["region_total"].iloc[0]
+            lines = [f"<b>{region}</b><br>Łącznie: {total:,.0f} zł<br><br>TOP 5:"]
+            for i, (_, row) in enumerate(sub_sorted.head(5).iterrows(), 1):
+                pct = (row["revenue"] / total * 100) if total > 0 else 0
+                lines.append(f"{i}. {row['sku']}: {row['revenue']:,.0f} zł ({pct:.1f}%)")
             hover_text[region] = "<br>".join(lines)
     else:
-        hover_text = {r: f"<b>{r}</b><br>Brak szczegółów" for r in region_totals["region"]}
+        hover_text = {}
+        for _, row in region_totals.iterrows():
+            hover_text[
+                row["region"]] = f"<b>{row['region']}</b><br>Łącznie: {row['region_total']:,.0f} zł<br>Brak szczegółów"
 
-    # Reszta kodu z mapą i wykresami...
+    # MAPA FOLIUM
     import os
     geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
 
     if not os.path.exists(geojson_path):
-        st.error(f"Nie znaleziono pliku GeoJSON")
+        st.error(f"Nie znaleziono pliku GeoJSON: {geojson_path}")
         return
 
     try:
@@ -1098,9 +1105,11 @@ def render_poland_map(week_start: date):
 
     m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="CartoDB positron")
 
+    # Dodaj GeoJSON z popupami
     for feature in geojson.get("features", []):
         region_name = feature.get("properties", {}).get("nazwa")
         revenue = region_revenue_dict.get(region_name, 0)
+
         popup_content = hover_text.get(region_name, f"<b>{region_name}</b><br>Brak danych")
 
         folium.GeoJson(
@@ -1117,19 +1126,77 @@ def render_poland_map(week_start: date):
 
     st_folium(m, width=1200, height=600)
 
-    # Wykres słupkowy
-    st.subheader("Sprzedaż według województw")
-    region_sorted = region_totals.sort_values("region_total", ascending=False)
+    # WYKRES SŁUPKOWY
+    st.subheader("📊 Sprzedaż według województw")
 
-    fig = go.Figure(go.Bar(
-        x=region_sorted["region_total"],
-        y=region_sorted["region"],
+    region_totals_sorted = region_totals.sort_values("region_total", ascending=False)
+
+    fig_bar = go.Figure(go.Bar(
+        x=region_totals_sorted["region_total"],
+        y=region_totals_sorted["region"],
         orientation="h",
-        marker=dict(color=region_sorted["region_total"], colorscale="Blues")
+        marker=dict(color=region_totals_sorted["region_total"], colorscale="Blues"),
+        text=region_totals_sorted["region_total"].apply(lambda x: f"{x:,.0f} zł"),
+        textposition="outside"
     ))
-    fig.update_layout(height=400, yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, use_container_width=True)# ─────────────────────────────────────────────────────────────
-# 11) Zakładki
+    fig_bar.update_layout(
+        xaxis_title="Przychód (zł)",
+        yaxis_title="Województwo",
+        height=400,
+        yaxis={"categoryorder": "total ascending"}
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # INTERAKTYWNY WYBÓR WOJEWÓDZTWA
+    st.markdown("---")
+    selected_region = st.selectbox(
+        "🔍 Wybierz województwo, aby zobaczyć TOP produkty",
+        options=sorted(region_totals["region"].tolist()),
+        index=0
+    )
+
+    if selected_region and not df_products.empty:
+        region_data = df_products[df_products["region"] == selected_region].copy()
+        region_data = region_data.sort_values("revenue", ascending=False)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(
+                f"Sprzedaż w {selected_region}",
+                f"{region_data['revenue'].sum():,.0f} zł".replace(",", " ")
+            )
+        with col2:
+            st.metric(
+                "Liczba różnych produktów w TOP 10",
+                f"{region_data['sku'].nunique()}"
+            )
+
+        # TOP produktów w wybranym województwie
+        st.markdown(f"#### TOP produkty w {selected_region}")
+        top_products = region_data.head(10).copy()
+        total_region = region_data["revenue"].sum()
+        top_products["share_pct"] = (top_products["revenue"] / total_region * 100).round(2)
+        top_products["revenue_formatted"] = top_products["revenue"].apply(lambda x: f"{x:,.0f} zł")
+
+        display_df = top_products[["sku", "product_name", "revenue_formatted", "share_pct"]].rename(columns={
+            "sku": "SKU",
+            "product_name": "Nazwa produktu",
+            "revenue_formatted": "Przychód",
+            "share_pct": "Udział %"
+        })
+
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # TABELA WSZYSTKICH REGIONÓW
+    with st.expander("📋 Pełna tabela - wszystkie województwa"):
+        summary = region_totals.sort_values("region_total", ascending=False).copy()
+        summary["revenue_formatted"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
+        st.dataframe(
+            summary[["region", "revenue_formatted"]].rename(
+                columns={"region": "Województwo", "revenue_formatted": "Przychód"}),
+            use_container_width=True,
+            hide_index=True
+        )# 11) Zakładki
 # ─────────────────────────────────────────────────────────────
 tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)","🇵🇱 Polska — mapa wg województw"])
 
