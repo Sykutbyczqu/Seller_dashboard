@@ -597,12 +597,11 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
 
 @st.cache_data(ttl=600)
 def query_poland_zip_full(week_start_iso: str) -> pd.DataFrame:
-    """Pobiera pełne dane bez limitu 2000 wierszy przez Metabase API."""
+    """Pobiera pełne dane przez CSV endpoint - bez limitu 2000 wierszy."""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
 
-    # Uproszczone zapytanie bez parametrów mustache
     sql = f"""
 WITH params AS (
   SELECT
@@ -616,7 +615,6 @@ lines AS (
     COALESCE(pt.name, l.name) AS product_name,
     COALESCE(l.price_total, l.price_subtotal,
              l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
-    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
     sh.receiver_zip
   FROM sale_order_line l
   JOIN sale_order s ON s.id = l.order_id
@@ -645,16 +643,15 @@ ORDER BY receiver_zip, revenue DESC;
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
-        "native": {
-            "query": sql
-        }
+        "native": {"query": sql}
     }
 
     headers = {"X-Metabase-Session": session}
 
     try:
+        # Pobierz jako CSV
         r = requests.post(
-            f"{METABASE_URL}/api/dataset",
+            f"{METABASE_URL}/api/dataset/csv",
             headers=headers,
             json=payload,
             timeout=180
@@ -664,41 +661,38 @@ ORDER BY receiver_zip, revenue DESC;
             get_metabase_session.clear()
             session = get_metabase_session()
             if not session:
-                st.error("Nie udało się odświeżyć sesji Metabase.")
                 return pd.DataFrame()
             headers = {"X-Metabase-Session": session}
             r = requests.post(
-                f"{METABASE_URL}/api/dataset",
+                f"{METABASE_URL}/api/dataset/csv",
                 headers=headers,
                 json=payload,
                 timeout=180
             )
 
-        if r.status_code != 200:
-            st.error(f"Błąd API Metabase: {r.status_code} - {r.text[:500]}")
-            if debug_api:
-                st.json(payload)
+        if r.status_code == 200:
+            from io import StringIO
+            df = pd.read_csv(StringIO(r.text))
+
+            # Standaryzuj nazwy kolumn
+            df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+            # Konwertuj typy
+            if "revenue" in df.columns:
+                df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
+
+            st.success(f"✅ Pobrano {len(df):,} wierszy | Suma: {df['revenue'].sum():,.0f} zł")
+            return df
+
+        elif r.status_code == 202:
+            st.warning("Zapytanie w trakcie przetwarzania (202). Spróbuj ponownie za chwilę.")
+            return pd.DataFrame()
+        else:
+            st.error(f"Błąd {r.status_code}: {r.text[:300]}")
             return pd.DataFrame()
 
-        data = r.json()
-        df = _metabase_json_to_df(data)
-
-        df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-
-        if "revenue" in df.columns:
-            df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
-
-        st.success(f"✅ Pobrano {len(df)} wierszy | Suma: {df.get('revenue', pd.Series([0])).sum():,.0f} zł")
-
-        return df
-
-    except requests.exceptions.Timeout:
-        st.error("Timeout - zapytanie trwało zbyt długo.")
-        return pd.DataFrame()
     except Exception as e:
         st.error(f"Błąd pobierania danych: {e}")
-        if debug_api:
-            st.exception(e)
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
@@ -1025,11 +1019,19 @@ def render_platform(platform_key: str,
 def render_poland_map(week_start: date):
     st.header("🗺️ Sprzedaż wg województw (na podstawie ZIP)")
 
-    # ZMIANA: użyj nowej funkcji
     df = query_poland_zip_full(week_start.isoformat())
 
     if df.empty:
         st.warning("Brak danych adresów ZIP dla tego tygodnia.")
+        return
+
+    # Mapowanie ZIP -> region
+    df["zip_prefix"] = df["receiver_zip"].astype(str).str[:2]
+    df["region"] = df["zip_prefix"].map(ZIP_TO_REGION)
+    df = df.dropna(subset=["region"])
+
+    if df.empty:
+        st.warning("Po mapowaniu ZIP → województwo brak danych.")
         return
 
     # Dodaj mapowanie ZIP -> region
