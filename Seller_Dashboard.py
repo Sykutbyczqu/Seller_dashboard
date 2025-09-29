@@ -1092,6 +1092,9 @@ def render_poland_map(week_start: date):
             use_container_width=True,
             hide_index=True
         )
+    st.write("Debug - suma revenue z query_poland_zip:", df["revenue"].sum())
+    st.write("Debug - liczba wierszy:", len(df))
+    st.write("Debug - przykładowe dane:", df.head(10))
 # ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
