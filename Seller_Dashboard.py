@@ -92,7 +92,7 @@ ZIP_TO_REGION = {
     "76": "Zachodniopomorskie", "77": "Zachodniopomorskie", "78": "Zachodniopomorskie",
 }
 
-SQL_WOW_POLAND_ZIP = """
+SQL_WOW_POLAND_REGION_ONLY = """
 WITH params AS (
   SELECT
     {{week_start}}::date AS week_start,
@@ -100,15 +100,36 @@ WITH params AS (
 ),
 lines AS (
   SELECT
-    l.product_id,
+    SUBSTRING(sh.receiver_zip FROM 1 FOR 2) AS zip_prefix,
+    SUM(COALESCE(l.price_total, l.price_subtotal, l.price_unit * COALESCE(l.product_uom_qty,0), 0)) AS revenue
+  FROM sale_order_line l
+  JOIN sale_order s ON s.id = l.order_id
+  JOIN res_currency cur ON cur.id = l.currency_id
+  LEFT JOIN shipping_order sh ON sh.sale_order_id = s.id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') < (SELECT week_end FROM params)
+    AND sh.receiver_zip IS NOT NULL
+  GROUP BY zip_prefix
+)
+SELECT * FROM lines WHERE revenue > 0 ORDER BY zip_prefix;
+"""
+
+SQL_WOW_POLAND_TOP_PRODUCTS = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end
+),
+lines AS (
+  SELECT
+    SUBSTRING(sh.receiver_zip FROM 1 FOR 2) AS zip_prefix,
     COALESCE(pp.default_code, l.product_id::text) AS sku,
     COALESCE(pt.name, l.name) AS product_name,
-    COALESCE(l.price_total, l.price_subtotal,
-             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
-    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
-    sh.receiver_zip,
-    l.id AS line_id,
-    s.id AS order_id
+    SUM(COALESCE(l.price_total, l.price_subtotal, l.price_unit * COALESCE(l.product_uom_qty,0), 0)) AS revenue
   FROM sale_order_line l
   JOIN sale_order s ON s.id = l.order_id
   JOIN res_currency cur ON cur.id = l.currency_id
@@ -121,95 +142,19 @@ lines AS (
     AND s.name LIKE '%-1'
     AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
     AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') < (SELECT week_end FROM params)
+    AND sh.receiver_zip IS NOT NULL
+  GROUP BY zip_prefix, sku, product_name
 ),
--- Deduplikacja: jedna linia zamówienia = jeden adres
-lines_dedup AS (
-  SELECT DISTINCT ON (line_id)
-    line_id,
-    sku,
-    product_name,
-    line_total,
-    receiver_zip
+ranked AS (
+  SELECT 
+    *,
+    ROW_NUMBER() OVER (PARTITION BY zip_prefix ORDER BY revenue DESC) AS rn
   FROM lines
-  WHERE receiver_zip IS NOT NULL
-  ORDER BY line_id, order_id
 )
-SELECT
-  receiver_zip,
-  sku,
-  product_name,
-  SUM(line_total) AS revenue
-FROM lines_dedup
-GROUP BY receiver_zip, sku, product_name
-ORDER BY receiver_zip, revenue DESC;
-"""
-SQL_WOW_ALLEGRO_PLN = """
-WITH params AS (
-  SELECT
-    {{week_start}}::date AS week_start,
-    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
-    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
-    {{week_start}}::date AS prev_end
-),
-lines AS (
-  SELECT
-    l.product_id,
-    COALESCE(pp.default_code, l.product_id::text) AS sku,
-    COALESCE(pt.name, l.name) AS product_name,
-    COALESCE(l.product_uom_qty, 0) AS qty,
-    COALESCE(l.price_total, l.price_subtotal,
-             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
-    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
-  FROM sale_order_line l
-  JOIN sale_order s           ON s.id = l.order_id
-  JOIN res_currency cur       ON cur.id = l.currency_id
-  LEFT JOIN product_product  pp ON pp.id = l.product_id
-  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
-  WHERE s.state IN ('sale','done')
-    AND cur.name = 'PLN'
-    AND s.name ILIKE '%Allegro%'
-    AND s.name LIKE '%-1'
-),
-w AS (
-  SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
-),
-curr AS (
-  SELECT
-    l.sku,
-    MAX(l.product_name) AS product_name,
-    SUM(l.line_total) AS curr_rev,
-    SUM(l.qty)        AS curr_qty
-  FROM lines l CROSS JOIN w
-  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
-    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
-  GROUP BY l.sku
-),
-prev AS (
-  SELECT
-    l.sku,
-    SUM(l.line_total) AS prev_rev,
-    SUM(l.qty)        AS prev_qty
-  FROM lines l CROSS JOIN w
-  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
-    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
-  GROUP BY l.sku
-)
-SELECT
-  c.sku,
-  c.product_name,
-  COALESCE(c.curr_rev,0) AS curr_rev,
-  COALESCE(c.curr_qty,0) AS curr_qty,
-  COALESCE(p.prev_rev,0) AS prev_rev,
-  COALESCE(p.prev_qty,0) AS prev_qty,
-  CASE WHEN COALESCE(p.prev_rev,0)=0 AND COALESCE(c.curr_rev,0)>0 THEN NULL
-       WHEN COALESCE(p.prev_rev,0)=0 THEN 0
-       ELSE (c.curr_rev - p.prev_rev) / NULLIF(p.prev_rev,0)::numeric * 100.0 END AS rev_change_pct,
-  CASE WHEN COALESCE(p.prev_qty,0)=0 AND COALESCE(c.curr_qty,0)>0 THEN NULL
-       WHEN COALESCE(p.prev_qty,0)=0 THEN 0
-       ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
-FROM curr c
-LEFT JOIN prev p ON p.sku = c.sku
-ORDER BY c.curr_rev DESC
+SELECT zip_prefix, sku, product_name, revenue
+FROM ranked
+WHERE rn <= 10
+ORDER BY zip_prefix, revenue DESC;
 """
 
 SQL_WOW_EBAY_EUR = """
@@ -1027,67 +972,45 @@ def render_platform(platform_key: str,
 def render_poland_map(week_start: date):
     st.header("🗺️ Sprzedaż wg województw (na podstawie ZIP)")
 
-    df = query_poland_zip_full(week_start.isoformat())
+    # Pobierz zagregowane dane województw
+    df_regions = query_snapshot(SQL_WOW_POLAND_REGION_ONLY, week_start.isoformat())
 
-    if df.empty:
+    if df_regions.empty:
         st.warning("Brak danych adresów ZIP dla tego tygodnia.")
         return
 
-    # Mapowanie ZIP -> region
-    df["zip_prefix"] = df["receiver_zip"].astype(str).str[:2]
-    df["region"] = df["zip_prefix"].map(ZIP_TO_REGION)
-    df = df.dropna(subset=["region"])
+    df_regions["region"] = df_regions["zip_prefix"].map(ZIP_TO_REGION)
+    df_regions = df_regions.dropna(subset=["region"])
 
-    if df.empty:
-        st.warning("Po mapowaniu ZIP → województwo brak danych.")
-        return
-
-    # Dodaj mapowanie ZIP -> region
-    if "receiver_zip" in df.columns:
-        df["zip_prefix"] = df["receiver_zip"].astype(str).str[:2]
-    elif "zip_prefix" not in df.columns:
-        st.error("Brak kolumny receiver_zip lub zip_prefix w danych")
-        return
-
-    df["region"] = df["zip_prefix"].map(ZIP_TO_REGION)
-    df = df.dropna(subset=["region"])
-
-    if df.empty:
-        st.warning("Po mapowaniu ZIP → województwo brak danych.")
-        return
-
-    # ... reszta kodu bez zmian
-
-    # Debug: pokaż unikalne regiony
-    st.info(f"Znalezione województwa w danych: {sorted(df['region'].unique())}")
-
-    grouped = df.groupby(["region", "sku", "product_name"], as_index=False).agg({"revenue": "sum"})
-    region_totals = grouped.groupby("region", as_index=False)["revenue"].sum().rename(
+    # Agreguj do poziomu województw
+    region_totals = df_regions.groupby("region", as_index=False)["revenue"].sum().rename(
         columns={"revenue": "region_total"})
-    grouped = grouped.merge(region_totals, on="region", how="left")
-    grouped["share_pct"] = grouped["revenue"] / grouped["region_total"] * 100
 
-    # KPI
-    st.metric("Łączna sprzedaż (wszystkie regiony)", f"{region_totals['region_total'].sum():,.0f} zł".replace(",", " "))
+    st.success(f"✅ Suma: {region_totals['region_total'].sum():,.0f} zł | Województw: {len(region_totals)}")
 
-    # Przygotuj tooltips
-    hover_text = {}
-    for region, sub in grouped.groupby("region"):
-        sub_sorted = sub.sort_values("revenue", ascending=False).reset_index(drop=True)
-        top5 = sub_sorted.head(5)
-        total = sub_sorted["revenue"].sum()
-        lines = [f"<b>{region}</b><br>Łącznie: {total:,.0f} zł<br><br>TOP 5:"]
-        lines += [f"{i + 1}. {row['sku']}: {row['revenue']:,.0f} zł ({row['share_pct']:.1f}%)"
-                  for i, (_, row) in enumerate(top5.iterrows())]
-        hover_text[region] = "<br>".join(lines)
+    # Pobierz TOP produkty (ograniczone do 10 na województwo = max ~160 wierszy)
+    df_products = query_snapshot(SQL_WOW_POLAND_TOP_PRODUCTS, week_start.isoformat())
 
-    df_map = region_totals.copy()
+    if not df_products.empty:
+        df_products["region"] = df_products["zip_prefix"].map(ZIP_TO_REGION)
+        df_products = df_products.dropna(subset=["region"])
 
+        # Przygotuj tooltips
+        hover_text = {}
+        for region, sub in df_products.groupby("region"):
+            lines = [f"<b>{region}</b><br>"]
+            for i, (_, row) in enumerate(sub.head(5).iterrows(), 1):
+                lines.append(f"{i}. {row['sku']}: {row['revenue']:,.0f} zł")
+            hover_text[region] = "<br>".join(lines)
+    else:
+        hover_text = {r: f"<b>{r}</b><br>Brak szczegółów" for r in region_totals["region"]}
+
+    # Reszta kodu z mapą i wykresami...
     import os
     geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
 
     if not os.path.exists(geojson_path):
-        st.error(f"Nie znaleziono pliku GeoJSON: {geojson_path}")
+        st.error(f"Nie znaleziono pliku GeoJSON")
         return
 
     try:
@@ -1097,10 +1020,10 @@ def render_poland_map(week_start: date):
         st.error(f"Błąd wczytywania GeoJSON: {e}")
         return
 
-    region_revenue_dict = df_map.set_index("region")["region_total"].to_dict()
+    region_revenue_dict = region_totals.set_index("region")["region_total"].to_dict()
 
-    max_revenue = df_map["region_total"].max()
-    min_revenue = df_map["region_total"].min()
+    max_revenue = region_totals["region_total"].max()
+    min_revenue = region_totals["region_total"].min()
 
     def get_color(revenue):
         if revenue is None or pd.isna(revenue):
@@ -1115,11 +1038,9 @@ def render_poland_map(week_start: date):
 
     m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="CartoDB positron")
 
-    # Dodaj GeoJSON z popupami
     for feature in geojson.get("features", []):
-        region_name = feature.get("properties", {}).get("name")
+        region_name = feature.get("properties", {}).get("nazwa")
         revenue = region_revenue_dict.get(region_name, 0)
-
         popup_content = hover_text.get(region_name, f"<b>{region_name}</b><br>Brak danych")
 
         folium.GeoJson(
@@ -1136,77 +1057,19 @@ def render_poland_map(week_start: date):
 
     st_folium(m, width=1200, height=600)
 
-    # SEKCJA INTERAKTYWNA - wybór województwa
-    st.subheader("📊 Szczegóły sprzedaży według województw")
+    # Wykres słupkowy
+    st.subheader("Sprzedaż według województw")
+    region_sorted = region_totals.sort_values("region_total", ascending=False)
 
-    # Wykres słupkowy wszystkich regionów
-    region_totals_sorted = region_totals.sort_values("region_total", ascending=False)
-
-    fig_bar = go.Figure(go.Bar(
-        x=region_totals_sorted["region_total"],
-        y=region_totals_sorted["region"],
+    fig = go.Figure(go.Bar(
+        x=region_sorted["region_total"],
+        y=region_sorted["region"],
         orientation="h",
-        marker=dict(color=region_totals_sorted["region_total"], colorscale="Blues"),
-        text=region_totals_sorted["region_total"].apply(lambda x: f"{x:,.0f} zł"),
-        textposition="outside"
+        marker=dict(color=region_sorted["region_total"], colorscale="Blues")
     ))
-    fig_bar.update_layout(
-        xaxis_title="Przychód (zł)",
-        yaxis_title="Województwo",
-        height=400,
-        yaxis={"categoryorder": "total ascending"}
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    fig.update_layout(height=400, yaxis={"categoryorder": "total ascending"})
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Wybór województwa do szczegółów
-    st.markdown("---")
-    selected_region = st.selectbox(
-        "🔍 Wybierz województwo, aby zobaczyć TOP produkty",
-        options=sorted(region_totals["region"].tolist()),
-        index=0
-    )
-
-    if selected_region:
-        region_data = grouped[grouped["region"] == selected_region].copy()
-        region_data = region_data.sort_values("revenue", ascending=False)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric(
-                f"Sprzedaż w {selected_region}",
-                f"{region_data['revenue'].sum():,.0f} zł".replace(",", " ")
-            )
-        with col2:
-            st.metric(
-                "Liczba różnych produktów",
-                f"{region_data['sku'].nunique()}"
-            )
-
-        # TOP 10 produktów
-        st.markdown(f"#### TOP 10 produktów w {selected_region}")
-        top_products = region_data.head(10).copy()
-        top_products["revenue_formatted"] = top_products["revenue"].apply(lambda x: f"{x:,.0f} zł")
-
-        display_df = top_products[["sku", "product_name", "revenue_formatted", "share_pct"]].rename(columns={
-            "sku": "SKU",
-            "product_name": "Nazwa produktu",
-            "revenue_formatted": "Przychód",
-            "share_pct": "Udział %"
-        })
-        display_df["Udział %"] = display_df["Udział %"].round(2)
-
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    # Tabela wszystkich regionów
-    with st.expander("📋 Pełna tabela - wszystkie województwa"):
-        summary = region_totals.sort_values("region_total", ascending=False).copy()
-        summary["revenue_formatted"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
-        st.dataframe(
-            summary[["region", "revenue_formatted"]].rename(
-                columns={"region": "Województwo", "revenue_formatted": "Przychód"}),
-            use_container_width=True,
-            hide_index=True
-        )
     st.write("Debug - suma revenue z query_poland_zip:", df["revenue"].sum())
     st.write("Debug - liczba wierszy:", len(df))
     st.write("Debug - przykładowe dane:", df.head(10))
