@@ -28,7 +28,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL queries dla różnych platform
+# 3) SQL queries dla różnych platform (snapshot + trend)
 # ─────────────────────────────────────────────────────────────
 SQL_ALLEGRO_PLN = """
 WITH params AS (
@@ -166,9 +166,99 @@ LEFT JOIN prev p ON p.sku = c.sku
 ORDER BY c.curr_rev DESC
 """
 
+# Nowe: trend w 1 zapytaniu (zakres tygodni)
+SQL_ALLEGRO_TREND = """
+WITH params AS (
+  SELECT
+    {{week_from}}::date AS week_from,
+    {{week_to}}::date   AS week_to
+),
+lines AS (
+  SELECT
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date) AT TIME ZONE 'Europe/Warsaw') AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+),
+w AS (
+  SELECT generate_series(
+           date_trunc('week', (SELECT week_from FROM params)),
+           date_trunc('week', (SELECT week_to   FROM params) - INTERVAL '1 day'),
+           INTERVAL '7 day'
+         ) AS week_start
+)
+SELECT
+  l.sku,
+  MAX(l.product_name) AS product_name,
+  w.week_start::date  AS week_start,
+  SUM(l.line_total)   AS curr_rev,
+  SUM(l.qty)          AS curr_qty
+FROM w
+LEFT JOIN lines l
+  ON l.order_ts >= w.week_start
+ AND l.order_ts <  w.week_start + INTERVAL '7 day'
+GROUP BY l.sku, w.week_start
+HAVING l.sku IS NOT NULL
+ORDER BY w.week_start ASC, curr_rev DESC;
+"""
+
+SQL_EBAY_TREND = """
+WITH params AS (
+  SELECT
+    {{week_from}}::date AS week_from,
+    {{week_to}}::date   AS week_to
+),
+lines AS (
+  SELECT
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date) AT TIME ZONE 'Europe/Warsaw') AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%eBay%'
+),
+w AS (
+  SELECT generate_series(
+           date_trunc('week', (SELECT week_from FROM params)),
+           date_trunc('week', (SELECT week_to   FROM params) - INTERVAL '1 day'),
+           INTERVAL '7 day'
+         ) AS week_start
+)
+SELECT
+  l.sku,
+  MAX(l.product_name) AS product_name,
+  w.week_start::date  AS week_start,
+  SUM(l.line_total)   AS curr_rev,
+  SUM(l.qty)          AS curr_qty
+FROM w
+LEFT JOIN lines l
+  ON l.order_ts >= w.week_start
+ AND l.order_ts <  w.week_start + INTERVAL '7 day'
+GROUP BY l.sku, w.week_start
+HAVING l.sku IS NOT NULL
+ORDER BY w.week_start ASC, curr_rev DESC;
+"""
 
 # ─────────────────────────────────────────────────────────────
-# 4) Metabase session (cache)
+# 4) Metabase session (cache) + HTTP pooling
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=50 * 60)
 def get_metabase_session() -> str | None:
@@ -181,6 +271,13 @@ def get_metabase_session() -> str | None:
         st.error(f"❌ Błąd logowania do Metabase: {e}")
         return None
 
+@st.cache_resource
+def get_http_session() -> requests.Session:
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=2)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
 
 # ─────────────────────────────────────────────────────────────
 # 5) /api/dataset caller (200/202/401 handling)
@@ -199,7 +296,9 @@ def _dataset_call(sql_text: str, params: dict, session: str, poll_max_s: float =
         ],
     }
     headers = {"X-Metabase-Session": session}
-    r = requests.post(f"{METABASE_URL}/api/dataset", headers=headers, json=payload, timeout=120)
+    http = get_http_session()
+
+    r = http.post(f"{METABASE_URL}/api/dataset", headers=headers, json=payload, timeout=120)
 
     if r.status_code == 401:
         return {"status": 401, "json": None, "text": r.text}
@@ -216,10 +315,10 @@ def _dataset_call(sql_text: str, params: dict, session: str, poll_max_s: float =
             deadline = time.time() + poll_max_s
             last = None
             while time.time() < deadline:
-                rr = requests.get(f"{METABASE_URL}/api/dataset/{token}/json", headers=headers, timeout=60)
+                rr = http.get(f"{METABASE_URL}/api/dataset/{token}/json", headers=headers, timeout=60)
                 if rr.status_code == 200 and rr.content:
                     return {"status": 200, "json": rr.json(), "text": rr.text}
-                rr = requests.get(f"{METABASE_URL}/api/dataset/{token}", headers=headers, timeout=60)
+                rr = http.get(f"{METABASE_URL}/api/dataset/{token}", headers=headers, timeout=60)
                 if rr.status_code == 200 and rr.content:
                     return {"status": 200, "json": rr.json(), "text": rr.text}
                 last = rr
@@ -228,7 +327,6 @@ def _dataset_call(sql_text: str, params: dict, session: str, poll_max_s: float =
         return {"status": 202, "json": None, "text": r.text}
 
     return {"status": r.status_code, "json": (r.json() if r.content else None), "text": r.text}
-
 
 # ─────────────────────────────────────────────────────────────
 # 6) Metabase JSON → DataFrame (robust)
@@ -265,9 +363,8 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
 
     return pd.DataFrame()
 
-
 # ─────────────────────────────────────────────────────────────
-# 7) Public query function (caching, session refresh)
+# 7) Public query (snapshot) + trend (1 call)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -> pd.DataFrame:
@@ -299,15 +396,48 @@ def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
+@st.cache_data(ttl=600)
+def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
+    """Pobiera trendy w jednym zapytaniu: [week_from, week_to)."""
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+
+    week_from = (week_start_date - timedelta(weeks=weeks - 1)).isoformat()
+    week_to   = (week_start_date + timedelta(days=7)).isoformat()
+
+    res = _dataset_call(sql_trend_text, {"week_from": week_from, "week_to": week_to}, session)
+    if res["status"] == 401:
+        get_metabase_session.clear()
+        session = get_metabase_session()
+        if not session:
+            st.error("❌ Nie udało się odświeżyć sesji Metabase (trend).")
+            return pd.DataFrame()
+        res = _dataset_call(sql_trend_text, {"week_from": week_from, "week_to": week_to}, session)
+
+    st.session_state[f"mb_last_status_{platform_key}_trend"] = res["status"]
+    st.session_state[f"mb_last_json_{platform_key}_trend"] = res["json"]
+
+    if res["status"] not in (200, 202) or not res["json"]:
+        st.error(f"❌ Metabase (trend) HTTP {res['status']}: {str(res.get('text', ''))[:300]}")
+        return pd.DataFrame()
+
+    df = _metabase_json_to_df(res["json"])
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    for col in ["curr_rev", "curr_qty"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "week_start" in df.columns:
+        df["week_start"] = pd.to_datetime(df["week_start"])
+    return df
 
 # ─────────────────────────────────────────────────────────────
-# 8) Pomocnicze funkcje (nie zmieniają się)
+# 8) Pomocnicze funkcje (nie zmieniają się w logice)
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
     d = today or datetime.now(TZ).date()
     offset = d.weekday() + 7
     return d - timedelta(days=offset)
-
 
 def classify_change_symbol(pct: float | np.floating | None, threshold: float):
     if pd.isna(pct): return ("—", "#9e9e9e")
@@ -321,7 +451,7 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         return ("🔴↓", "#ef5350")
     return ("⚪≈", "#9e9e9e")
 
-
+# Stare API wielo-zapytaniowe zostawione jako fallback (nieużywane, ale może się przydać)
 @st.cache_data(ttl=600)
 def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
     """Query trend data for multiple weeks - cache key includes platform"""
@@ -340,14 +470,14 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, pla
         return all_df
     return pd.DataFrame()
 
-
+@st.cache_data(ttl=3600)
 def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         dframe.to_excel(writer, index=False, sheet_name="sprzedaz")
     return output.getvalue()
 
-
+@st.cache_data(ttl=3600)
 def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf = io.BytesIO()
     d = dframe.copy().head(200)
@@ -364,11 +494,10 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf.seek(0)
     return buf.read()
 
-
 # ─────────────────────────────────────────────────────────────
 # 9) Funkcja do renderowania zawartości zakładki
 # ─────────────────────────────────────────────────────────────
-def render_platform_analysis(platform_name: str, sql_query: str, currency: str, platform_key: str):
+def render_platform_analysis(platform_name: str, sql_query: str, currency: str, platform_key: str, sql_query_trend: str | None = None):
     """Renderuje pełną analizę dla danej platformy"""
 
     # Filtry w sidebarze (wspólne dla obu platform)
@@ -390,10 +519,9 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
 
     debug_api = st.sidebar.checkbox(f"Debug API - {platform_name}", value=False, key=f"debug_{platform_key}")
 
-    st.caption(
-        f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw  •  Waluta: {currency}")
+    st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw  •  Waluta: {currency}")
 
-    # Pobranie danych
+    # Pobranie danych (snapshot)
     df = query_platform_data(sql_query, week_start.isoformat(), platform_key)
 
     if debug_api:
@@ -402,25 +530,22 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         st.json(st.session_state.get(f"mb_last_json_{platform_key}"))
 
     if df.empty:
-        st.warning(
-            f"Brak danych dla wybranego tygodnia ({currency}) na {platform_name}. Zmień tydzień lub sprawdź źródło.")
+        st.warning(f"Brak danych dla wybranego tygodnia ({currency}) na {platform_name}. Zmień tydzień lub sprawdź źródło.")
         return
 
     need = {"sku", "product_name", "curr_rev", "prev_rev", "curr_qty", "prev_qty", "rev_change_pct", "qty_change_pct"}
     missing = [c for c in need if c not in df.columns]
     if missing:
         st.error(f"Brak kolumn w danych: {missing}")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(df.head(), width='stretch', hide_index=True)
         return
 
     # Ranking TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
 
     # Klasyfikacja zmian
-    df_top["status_rev"], df_top["color_rev"] = zip(
-        *df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
-    df_top["status_qty"], df_top["color_qty"] = zip(
-        *df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
+    df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
+    df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
 
     # KPI
     sum_curr = float(df["curr_rev"].sum() or 0)
@@ -439,9 +564,10 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency})")
 
     colors = df_top["color_rev"].tolist()
-    hover = df_top.apply(lambda
-                             r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
-                         axis=1)
+    hover = df_top.apply(
+        lambda r: f"{r.sku} — {str(r.product_name)[:80]}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
+        axis=1
+    )
     fig = go.Figure(go.Bar(
         x=df_top["curr_rev"],
         y=df_top["sku"],
@@ -451,7 +577,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         hovertext=hover
     ))
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     # Waterfall
     st.subheader(f"📊 Wkład TOP produktów w zmianę sprzedaży (waterfall) - {currency}")
@@ -476,12 +602,15 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         totals=dict(marker=dict(color="#42a5f5"))
     )
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False)
-    st.plotly_chart(fig_wf, use_container_width=True)
+    st.plotly_chart(fig_wf, width='stretch')
 
     # Trend tygodniowy
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
-    df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
+    if sql_query_trend:
+        df_trend = query_platform_trend(sql_query_trend, week_start, weeks=weeks_back, platform_key=platform_key)
+    else:
+        df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
 
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
@@ -511,13 +640,13 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
 
             fig_tr = go.Figure()
             for sku in pv.columns:
-                y = pv[sku].values
+                yvals = pv[sku].values
                 if chart_type == "area":
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines", name=sku, stackgroup="one"))
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines", name=sku, stackgroup="one"))
                 else:
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines+markers", name=sku))
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
             fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520)
-            st.plotly_chart(fig_tr, use_container_width=True)
+            st.plotly_chart(fig_tr, width='stretch')
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
@@ -550,16 +679,16 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         if ups.empty:
             st.info("Brak pozycji przekraczających próg wzrostu.")
         else:
-            st.dataframe(to_display(ups), use_container_width=True)
+            st.dataframe(to_display(ups), width='stretch', hide_index=True)
     with colB:
         st.markdown("### 📉 Spadki (≤ -próg)")
         if downs.empty:
             st.info("Brak pozycji przekraczających próg spadku.")
         else:
-            st.dataframe(to_display(downs), use_container_width=True)
+            st.dataframe(to_display(downs), width='stretch', hide_index=True)
 
     with st.expander("🔎 Podgląd TOP (tabela)"):
-        st.dataframe(to_display(df_top), use_container_width=True)
+        st.dataframe(to_display(df_top), width='stretch', hide_index=True)
 
     # Eksport danych
     st.subheader("📥 Eksport danych")
@@ -587,7 +716,6 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
             st.subheader("Raw JSON (Metabase)")
             st.json(st.session_state.get(f"mb_last_json_{platform_key}"))
 
-
 # ─────────────────────────────────────────────────────────────
 # 10) Główna aplikacja z zakładkami
 # ─────────────────────────────────────────────────────────────
@@ -603,12 +731,7 @@ st.markdown("""
       z-index: 999;
       border-bottom: 1px solid rgba(0,0,0,0.06);
     }
-
-    /* Style dla zakładek */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
         white-space: pre-wrap;
@@ -618,10 +741,7 @@ st.markdown("""
         padding-top: 10px;
         padding-bottom: 10px;
     }
-
-    .stTabs [aria-selected="true"] {
-        background-color: #ffffff;
-    }
+    .stTabs [aria-selected="true"] { background-color: #ffffff; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -634,7 +754,8 @@ with tab1:
         platform_name="Allegro.pl",
         sql_query=SQL_ALLEGRO_PLN,
         currency="PLN",
-        platform_key="allegro"
+        platform_key="allegro",
+        sql_query_trend=SQL_ALLEGRO_TREND
     )
 
 with tab2:
@@ -643,5 +764,6 @@ with tab2:
         platform_name="eBay.de",
         sql_query=SQL_EBAY_EUR,
         currency="EUR",
-        platform_key="ebay"
+        platform_key="ebay",
+        sql_query_trend=SQL_EBAY_TREND
     )
