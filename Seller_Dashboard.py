@@ -610,6 +610,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
     st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)  # ← tylko config
 
     # Trend tygodniowy
+    # Trend tygodniowy
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
     df_trend = (
@@ -624,7 +625,8 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
 
         search_term = st.text_input(f"Szukaj SKU lub produktu - {platform_name}", "", key=f"search_{platform_key}")
-        filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()] if search_term else all_skus
+        filtered_skus = [sku for sku in all_skus if
+                         search_term.lower() in str(sku).lower()] if search_term else all_skus
 
         pick_skus = st.multiselect(
             f"Wybierz SKU do analizy trendu - {platform_name}",
@@ -637,19 +639,63 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                               key=f"chart_{platform_key}")
 
         if pick_skus:
-            df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
-            df_plot = df_plot.groupby(["week_start", "sku"])["curr_rev"].sum().reset_index()
-            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+            # 1) Sumujemy wartość i ilość per tydzień i SKU
+            df_plot = (
+                df_trend[df_trend["sku"].isin(pick_skus)]
+                .groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]]
+                .sum()
+            )
 
+            # 2) Budujemy pełną oś tygodni (poniedziałki) wg slidera
+            full_weeks = pd.date_range(
+                start=week_start - timedelta(weeks=weeks_back - 1),
+                end=week_start,
+                freq="W-MON"  # poniedziałek
+            )
+
+            # 3) Pivot + reindex (wypełniamy brakujące tygodnie zerami) — identycznie dla Allegro i eBay
+            rev_pv = (
+                df_plot.pivot(index="week_start", columns="sku", values="curr_rev")
+                .reindex(full_weeks, fill_value=0)
+            )
+            qty_pv = (
+                df_plot.pivot(index="week_start", columns="sku", values="curr_qty")
+                .reindex(full_weeks, fill_value=0)
+            )
+
+            # 4) Wykres z tooltipem pokazującym ilość sztuk
             fig_tr = go.Figure()
-            for sku in pv.columns:
-                yvals = pv[sku].values
+            currency_symbol = "zł" if currency == "PLN" else "€"
+
+            for sku in rev_pv.columns:
+                yvals = rev_pv[sku].values
+                qvals = qty_pv[sku].values
+                common = dict(
+                    x=rev_pv.index,
+                    y=yvals,
+                    name=sku,
+                    customdata=np.stack([qvals], axis=-1),
+                    hovertemplate=(
+                        "<b>%{fullData.name}</b><br>"
+                        "%{x|%Y-%m-%d}<br>"
+                        f"Sprzedaż: %{{y:,.0f}} {currency_symbol}<br>"
+                        "Ilość: %{customdata[0]:,.0f}"
+                        "<extra></extra>"
+                    )
+                )
                 if chart_type == "area":
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines", name=sku, stackgroup="one"))
+                    fig_tr.add_trace(go.Scatter(mode="lines", stackgroup="one", **common))
                 else:
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
-            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520, autosize=True)
-            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)  # ← tylko config
+                    fig_tr.add_trace(go.Scatter(mode="lines+markers", **common))
+
+            fig_tr.update_layout(
+                xaxis=dict(tickformat="%Y-%m-%d"),
+                yaxis_title=f"Sprzedaż ({currency})",
+                height=520,
+                autosize=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)  # tylko config — bez deprecated kwargs
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
