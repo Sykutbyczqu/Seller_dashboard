@@ -602,40 +602,62 @@ def query_poland_zip_full(week_start_iso: str) -> pd.DataFrame:
     if not session:
         return pd.DataFrame()
 
-    sql = SQL_WOW_POLAND_ZIP
-    params = {"week_start": week_start_iso}
+    # Uproszczone zapytanie bez parametrów mustache
+    sql = f"""
+WITH params AS (
+  SELECT
+    '{week_start_iso}'::date AS week_start,
+    ('{week_start_iso}'::date + INTERVAL '7 day') AS week_end
+),
+lines AS (
+  SELECT
+    l.product_id,
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
+    sh.receiver_zip
+  FROM sale_order_line l
+  JOIN sale_order s ON s.id = l.order_id
+  JOIN res_currency cur ON cur.id = l.currency_id
+  LEFT JOIN shipping_order sh ON sh.sale_order_id = s.id
+  LEFT JOIN product_product pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') < (SELECT week_end FROM params)
+    AND sh.receiver_zip IS NOT NULL
+)
+SELECT
+  receiver_zip,
+  sku,
+  product_name,
+  SUM(line_total) AS revenue
+FROM lines
+GROUP BY receiver_zip, sku, product_name
+ORDER BY receiver_zip, revenue DESC;
+"""
 
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
         "native": {
-            "query": sql,
-            "template-tags": {
-                "week_start": {
-                    "name": "week_start",
-                    "display-name": "week_start",
-                    "type": "date"
-                }
-            },
-        },
-        "parameters": [
-            {
-                "type": "date",
-                "target": ["variable", ["template-tag", "week_start"]],
-                "value": week_start_iso
-            }
-        ],
+            "query": sql
+        }
     }
 
     headers = {"X-Metabase-Session": session}
 
-    # Użyj endpointu JSON który zwraca wszystkie wyniki
     try:
         r = requests.post(
-            f"{METABASE_URL}/api/dataset/json",
+            f"{METABASE_URL}/api/dataset",
             headers=headers,
             json=payload,
-            timeout=180  # dłuższy timeout dla dużych zapytań
+            timeout=180
         )
 
         if r.status_code == 401:
@@ -646,40 +668,37 @@ def query_poland_zip_full(week_start_iso: str) -> pd.DataFrame:
                 return pd.DataFrame()
             headers = {"X-Metabase-Session": session}
             r = requests.post(
-                f"{METABASE_URL}/api/dataset/json",
+                f"{METABASE_URL}/api/dataset",
                 headers=headers,
                 json=payload,
                 timeout=180
             )
 
         if r.status_code != 200:
-            st.error(f"Błąd API Metabase: {r.status_code} - {r.text[:300]}")
+            st.error(f"Błąd API Metabase: {r.status_code} - {r.text[:500]}")
+            if debug_api:
+                st.json(payload)
             return pd.DataFrame()
 
-        # Parse JSON response
         data = r.json()
+        df = _metabase_json_to_df(data)
 
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        else:
-            df = _metabase_json_to_df(data)
-
-        # Standaryzuj kolumny
         df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-        # Konwertuj typy
         if "revenue" in df.columns:
             df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
 
-        st.info(f"Pobrano {len(df)} wierszy, suma: {df.get('revenue', pd.Series([0])).sum():,.0f} zł")
+        st.success(f"✅ Pobrano {len(df)} wierszy | Suma: {df.get('revenue', pd.Series([0])).sum():,.0f} zł")
 
         return df
 
     except requests.exceptions.Timeout:
-        st.error("Timeout - zapytanie trwało zbyt długo. Spróbuj zmniejszyć zakres danych.")
+        st.error("Timeout - zapytanie trwało zbyt długo.")
         return pd.DataFrame()
     except Exception as e:
         st.error(f"Błąd pobierania danych: {e}")
+        if debug_api:
+            st.exception(e)
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
