@@ -156,6 +156,74 @@ FROM ranked
 WHERE rn <= 10
 ORDER BY zip_prefix, revenue DESC;
 """
+SQL_WOW_ALLEGRO_PLN = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+lines AS (
+  SELECT
+    l.product_id,
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
+),
+w AS (
+  SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
+),
+curr AS (
+  SELECT
+    l.sku,
+    MAX(l.product_name) AS product_name,
+    SUM(l.line_total) AS curr_rev,
+    SUM(l.qty)        AS curr_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
+  GROUP BY l.sku
+),
+prev AS (
+  SELECT
+    l.sku,
+    SUM(l.line_total) AS prev_rev,
+    SUM(l.qty)        AS prev_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
+  GROUP BY l.sku
+)
+SELECT
+  c.sku,
+  c.product_name,
+  COALESCE(c.curr_rev,0) AS curr_rev,
+  COALESCE(c.curr_qty,0) AS curr_qty,
+  COALESCE(p.prev_rev,0) AS prev_rev,
+  COALESCE(p.prev_qty,0) AS prev_qty,
+  CASE WHEN COALESCE(p.prev_rev,0)=0 AND COALESCE(c.curr_rev,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_rev,0)=0 THEN 0
+       ELSE (c.curr_rev - p.prev_rev) / NULLIF(p.prev_rev,0)::numeric * 100.0 END AS rev_change_pct,
+  CASE WHEN COALESCE(p.prev_qty,0)=0 AND COALESCE(c.curr_qty,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_qty,0)=0 THEN 0
+       ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
+FROM curr c
+LEFT JOIN prev p ON p.sku = c.sku
+ORDER BY c.curr_rev DESC
+"""
 
 SQL_WOW_EBAY_EUR = """
 WITH params AS (
@@ -542,7 +610,7 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
 
 @st.cache_data(ttl=600)
 def query_poland_zip_full(week_start_iso: str) -> pd.DataFrame:
-    """Pobiera pełne dane - obchodzi limit 2000 wierszy."""
+    """Pobiera pełne dane przez CSV endpoint - bez limitu 2000 wierszy."""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -588,15 +656,15 @@ ORDER BY receiver_zip, revenue DESC;
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
-        "native": {"query": sql},
-        "constraints": {"max-results": 1000000}  # Ustaw wysoki limit
+        "native": {"query": sql}
     }
 
     headers = {"X-Metabase-Session": session}
 
     try:
+        # Pobierz jako CSV
         r = requests.post(
-            f"{METABASE_URL}/api/dataset",
+            f"{METABASE_URL}/api/dataset/csv",
             headers=headers,
             json=payload,
             timeout=180
@@ -609,43 +677,35 @@ ORDER BY receiver_zip, revenue DESC;
                 return pd.DataFrame()
             headers = {"X-Metabase-Session": session}
             r = requests.post(
-                f"{METABASE_URL}/api/dataset",
+                f"{METABASE_URL}/api/dataset/csv",
                 headers=headers,
                 json=payload,
                 timeout=180
             )
 
         if r.status_code == 200:
-            data = r.json()
-            df = _metabase_json_to_df(data)
+            from io import StringIO
+            df = pd.read_csv(StringIO(r.text))
+
+            # Standaryzuj nazwy kolumn
             df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
+            # Konwertuj typy
             if "revenue" in df.columns:
                 df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
 
-            st.success(f"Pobrano {len(df):,} wierszy | Suma: {df.get('revenue', pd.Series([0])).sum():,.0f} zł")
+            st.success(f"✅ Pobrano {len(df):,} wierszy | Suma: {df['revenue'].sum():,.0f} zł")
             return df
 
         elif r.status_code == 202:
-            # Asynchroniczne przetwarzanie
-            data = r.json()
-            # Jeśli są już wiersze w odpowiedzi 202
-            if isinstance(data, dict) and "data" in data and "rows" in data["data"]:
-                df = _metabase_json_to_df(data)
-                df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-                if "revenue" in df.columns:
-                    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
-                st.info(f"Częściowe dane (202): {len(df):,} wierszy")
-                return df
-
-            st.warning("Zapytanie w trakcie przetwarzania. Odśwież stronę za chwilę.")
+            st.warning("Zapytanie w trakcie przetwarzania (202). Spróbuj ponownie za chwilę.")
             return pd.DataFrame()
         else:
-            st.error(f"Błąd {r.status_code}: {r.text[:500]}")
+            st.error(f"Błąd {r.status_code}: {r.text[:300]}")
             return pd.DataFrame()
 
     except Exception as e:
-        st.error(f"Błąd: {e}")
+        st.error(f"Błąd pobierania danych: {e}")
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
@@ -1068,12 +1128,7 @@ def render_poland_map(week_start: date):
         marker=dict(color=region_sorted["region_total"], colorscale="Blues")
     ))
     fig.update_layout(height=400, yaxis={"categoryorder": "total ascending"})
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.write("Debug - suma revenue z query_poland_zip:", df["revenue"].sum())
-    st.write("Debug - liczba wierszy:", len(df))
-    st.write("Debug - przykładowe dane:", df.head(10))
-# ─────────────────────────────────────────────────────────────
+    st.plotly_chart(fig, use_container_width=True)# ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
 tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)","🇵🇱 Polska — mapa wg województw"])
