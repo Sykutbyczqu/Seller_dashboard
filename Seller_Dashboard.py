@@ -377,7 +377,7 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
     return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
-# 8) UI — wspólne filtry (działają dla wszystkich zakładek)
+# 8) UI — wspólne filtry
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
     d = today or datetime.now(TZ).date()
@@ -464,7 +464,7 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     return buf.read()
 
 # ─────────────────────────────────────────────────────────────
-# 10) Renderer pojedynczej platformy (kod z Twojej wersji)
+# 10) Renderer pojedynczej platformy (z bogatym hoverem w trendzie)
 # ─────────────────────────────────────────────────────────────
 def render_platform(platform_key: str, platform_title: str, sql_query: str, currency_label: str, currency_symbol: str):
     st.header(platform_title)
@@ -525,7 +525,10 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
 
     colors = df_top["color_rev"].tolist()
-    hover = df_top.apply(lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}", axis=1)
+    hover = df_top.apply(
+        lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
+        axis=1
+    )
     fig = go.Figure(go.Bar(
         x=df_top["curr_rev"],
         y=df_top["sku"],
@@ -562,7 +565,7 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency_label})", showlegend=False, height=420)
     st.plotly_chart(fig_wf, width="stretch")
 
-    # Trend tygodniowy — w oparciu o wiele snapshotów
+    # Trend tygodniowy — z ładnym hoverem
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
     df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back)
@@ -581,21 +584,69 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
             default=filtered_skus[:5] if filtered_skus else []
         )
 
-        chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=0, horizontal=True)
+        chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=1, horizontal=True)
 
         if pick_skus:
+            # agregacja tydzień × SKU: przyjmujemy brakujące tygodnie = 0
             df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
-            df_plot = df_plot.groupby(["week_start","sku"])["curr_rev"].sum().reset_index()
-            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+            df_plot = df_plot.groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]].sum()
+
+            # pełna oś tygodniowa (poniedziałki)
+            full_weeks = pd.date_range(
+                start=df_plot["week_start"].min().normalize(),
+                end=df_plot["week_start"].max().normalize(),
+                freq="W-MON"
+            )
+
+            # Pivoty: przychód i ilość
+            pv_rev = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").reindex(full_weeks).fillna(0.0)
+            pv_qty = df_plot.pivot(index="week_start", columns="sku", values="curr_qty").reindex(full_weeks).fillna(0.0)
+
+            # etykiety końca tygodnia do hovera (pon → niedz)
+            week_end_labels = (pv_rev.index + pd.Timedelta(days=6)).strftime("%Y-%m-%d").values
 
             fig_tr = go.Figure()
-            for sku in pv.columns:
-                y = pv[sku].values
+            for sku in pv_rev.columns:
+                y = pv_rev[sku].values.astype(float)
+                q = pv_qty[sku].values.astype(float)
+                prev = np.concatenate(([np.nan], y[:-1]))
+                wow_abs = y - prev
+                wow_pct = np.where((prev > 0) & np.isfinite(prev), (y - prev) / prev * 100.0, np.nan)
+
+                # customdata: [qty, wow_abs, wow_pct, week_end_label]
+                custom = np.column_stack([q, wow_abs, wow_pct, week_end_labels])
+
+                hovertemplate = (
+                    "<b>%{fullData.name}</b><br>"
+                    "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
+                    f"Sprzedaż: %{y:,.0f} {currency_symbol}<br>"
+                    "Ilość: %{customdata[0]:,.0f} szt.<br>"
+                    f"WoW: %{customdata[1]:+,.0f} {currency_symbol} "
+                    "(%{customdata[2]:+.0f}%)"
+                    "<extra></extra>"
+                )
+
                 if chart_type == "area":
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines", name=sku, stackgroup="one"))
+                    fig_tr.add_trace(
+                        go.Scatter(
+                            x=pv_rev.index, y=y, name=sku, mode="lines",
+                            stackgroup="one", customdata=custom, hovertemplate=hovertemplate
+                        )
+                    )
                 else:
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines+markers", name=sku))
-            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency_label})", height=520)
+                    fig_tr.add_trace(
+                        go.Scatter(
+                            x=pv_rev.index, y=y, name=sku, mode="lines+markers",
+                            customdata=custom, hovertemplate=hovertemplate
+                        )
+                    )
+
+            fig_tr.update_layout(
+                xaxis=dict(tickformat="%Y-%m-%d"),
+                yaxis_title=f"Sprzedaż ({currency_label})",
+                height=520,
+                hovermode="x unified"
+            )
             st.plotly_chart(fig_tr, width="stretch")
 
     # Tabele
