@@ -106,27 +106,40 @@ lines AS (
     COALESCE(l.price_total, l.price_subtotal,
              l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
     COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
-    sh.receiver_zip
+    sh.receiver_zip,
+    l.id AS line_id,
+    s.id AS order_id
   FROM sale_order_line l
-  JOIN sale_order s     ON s.id = l.order_id
-  JOIN shipping_order sh ON sh.sale_order_id = s.id
+  JOIN sale_order s ON s.id = l.order_id
   JOIN res_currency cur ON cur.id = l.currency_id
-  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN shipping_order sh ON sh.sale_order_id = s.id
+  LEFT JOIN product_product pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
     AND cur.name = 'PLN'
     AND s.name ILIKE '%Allegro%'
     AND s.name LIKE '%-1'
     AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
-    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  (SELECT week_end FROM params)
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') < (SELECT week_end FROM params)
+),
+-- Deduplikacja: jedna linia zamówienia = jeden adres
+lines_dedup AS (
+  SELECT DISTINCT ON (line_id)
+    line_id,
+    sku,
+    product_name,
+    line_total,
+    receiver_zip
+  FROM lines
+  WHERE receiver_zip IS NOT NULL
+  ORDER BY line_id, order_id
 )
 SELECT
   receiver_zip,
   sku,
   product_name,
   SUM(line_total) AS revenue
-FROM lines
-WHERE receiver_zip IS NOT NULL
+FROM lines_dedup
 GROUP BY receiver_zip, sku, product_name
 ORDER BY receiver_zip, revenue DESC;
 """
