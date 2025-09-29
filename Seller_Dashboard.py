@@ -979,13 +979,13 @@ def render_poland_map(week_start: date):
         geojson,
         name="województwa",
         style_function=lambda feature: {
-            "fillColor": get_color(region_revenue_dict.get(feature.get("properties", {}).get("nazwa"), None)),
+            "fillColor": get_color(region_revenue_dict.get(feature.get("properties", {}).get("name"), None)),
             "color": "black",
             "weight": 1,
             "fillOpacity": 0.7,
         },
         tooltip=folium.GeoJsonTooltip(
-            fields=["nazwa"],
+            fields=["name"],
             aliases=["Województwo:"],
             localize=True
         )
