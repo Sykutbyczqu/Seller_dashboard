@@ -4,7 +4,3 @@ plotly
 requests
 matplotlib
 openpyxl
-io
-time
-ZoneInfo
-numpy
