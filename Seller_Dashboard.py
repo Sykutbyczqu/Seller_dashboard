@@ -574,11 +574,11 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
         return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
 @st.cache_data(ttl=600)
-def query_poland_regions(week_start_iso: str) -> pd.DataFrame:
+def query_poland_zip(week_start_iso: str) -> pd.DataFrame:
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
-    res = _dataset_call(SQL_WOW_POLAND_REGIONS, {"week_start": week_start_iso}, session)
+    res = _dataset_call(SQL_WOW_POLAND_ZIP, {"week_start": week_start_iso}, session)
     if res["status"] != 200 or not res["json"]:
         return pd.DataFrame()
     df = _metabase_json_to_df(res["json"])
