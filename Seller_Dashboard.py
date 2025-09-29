@@ -32,6 +32,42 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 # ─────────────────────────────────────────────────────────────
 # 3) SQL — snapshoty WoW (po jednym na platformę)
 # ─────────────────────────────────────────────────────────────
+SQL_WOW_POLAND_REGIONS = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end
+),
+lines AS (
+  SELECT
+    l.product_id,
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
+    st.name AS region
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_partner p          ON s.partner_id = p.id
+  LEFT JOIN res_country_state st ON st.id = p.state_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
+    AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  (SELECT week_end FROM params)
+)
+SELECT
+  region,
+  sku,
+  product_name,
+  SUM(line_total) AS revenue
+FROM lines
+WHERE region IS NOT NULL
+GROUP BY region, sku, product_name
+ORDER BY region, revenue DESC;
+"""
+
 SQL_WOW_ALLEGRO_PLN = """
 WITH params AS (
   SELECT
