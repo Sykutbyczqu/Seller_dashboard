@@ -35,7 +35,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 # ─────────────────────────────────────────────────────────────
 # 3) SQL — snapshoty WoW (po jednym na platformę)
 # ─────────────────────────────────────────────────────────────
-ZIP_TO_REGION = ZIP_TO_REGION = {
+ZIP_TO_REGION = {
     # Dolnoslaskie
     "50": "Dolnoslaskie", "51": "Dolnoslaskie", "52": "Dolnoslaskie", "53": "Dolnoslaskie",
     "54": "Dolnoslaskie", "55": "Dolnoslaskie", "56": "Dolnoslaskie", "57": "Dolnoslaskie",
@@ -110,9 +110,13 @@ lines AS (
   FROM sale_order_line l
   JOIN sale_order s     ON s.id = l.order_id
   JOIN shipping_order sh ON sh.sale_order_id = s.id
+  JOIN res_currency cur ON cur.id = l.currency_id
   LEFT JOIN product_product  pp ON pp.id = l.product_id
   LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
   WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
     AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= (SELECT week_start FROM params)
     AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  (SELECT week_end FROM params)
 )
@@ -125,9 +129,7 @@ FROM lines
 WHERE receiver_zip IS NOT NULL
 GROUP BY receiver_zip, sku, product_name
 ORDER BY receiver_zip, revenue DESC;
-
 """
-
 SQL_WOW_ALLEGRO_PLN = """
 WITH params AS (
   SELECT
