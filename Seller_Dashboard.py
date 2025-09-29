@@ -56,6 +56,7 @@ lines AS (
   WHERE s.state IN ('sale','done')
     AND cur.name = 'PLN'
     AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
 ),
 w AS (
   SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
@@ -256,6 +257,7 @@ orders_raw AS (
   WHERE s.state IN ('sale','done')
     AND cur.name = 'PLN'
     AND s.name ILIKE '%Allegro%'
+    AND s.name LIKE '%-1'
 )
 SELECT
   COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
