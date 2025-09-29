@@ -995,4 +995,4 @@ with tabs[2]:
         currency_symbol="€",
     )
 with tabs[3]:
-    render_poland_map()
+    render_poland_map(week_start)
