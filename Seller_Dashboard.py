@@ -2,6 +2,8 @@
 import io
 import os
 import time
+import folium
+from streamlit_folium import st_folium
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import json
@@ -932,6 +934,7 @@ def render_poland_map(week_start: date):
     grouped = grouped.merge(region_totals, on="region", how="left")
     grouped["share_pct"] = grouped["revenue"] / grouped["region_total"] * 100
 
+    # Przygotuj dane dla tooltipów
     hover_text = {}
     for region, sub in grouped.groupby("region"):
         sub_sorted = sub.sort_values("revenue", ascending=False).reset_index(drop=True)
@@ -942,60 +945,76 @@ def render_poland_map(week_start: date):
     df_map = region_totals.copy()
     df_map["hover_info"] = df_map["region"].map(hover_text)
 
+    # Wczytaj GeoJSON
+    import os
     geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
 
-    # Sprawdź czy plik istnieje
     if not os.path.exists(geojson_path):
-        st.error(f"❌ Nie znaleziono pliku GeoJSON: {geojson_path}")
-        st.info("Upewnij się, że plik 'polska-wojewodztwa.geojson' znajduje się w tym samym katalogu co skrypt.")
+        st.error(f"Nie znaleziono pliku GeoJSON: {geojson_path}")
         return
 
-    # Próba wczytania pliku
     try:
         with open(geojson_path, "r", encoding="utf-8") as f:
             geojson = json.load(f)
-    except json.JSONDecodeError as e:
-        st.error(f"❌ Błąd parsowania pliku GeoJSON: {e}")
-        st.info("Sprawdź czy plik GeoJSON ma poprawny format JSON.")
-        return
     except Exception as e:
-        st.error(f"❌ Błąd wczytywania pliku GeoJSON: {e}")
+        st.error(f"Błąd wczytywania GeoJSON: {e}")
         return
 
-    # Sprawdź strukturę GeoJSON
-    if not isinstance(geojson, dict) or "features" not in geojson:
-        st.error("❌ Niepoprawna struktura pliku GeoJSON - brak pola 'features'")
-        return
+    # Stwórz słownik region -> revenue dla koloru
+    region_revenue_dict = df_map.set_index("region")["region_total"].to_dict()
 
-    # Opcjonalnie: wyświetl debug info o nazwach w GeoJSON
-    if debug_api:
-        geojson_names = [f.get("properties", {}).get("nazwa", "BRAK") for f in geojson.get("features", [])]
-        st.write("Nazwy województw w GeoJSON:", geojson_names)
-        st.write("Nazwy województw w danych:", df_map["region"].unique().tolist())
+    # Normalizuj wartości dla kolorowania (0-1)
+    max_revenue = df_map["region_total"].max()
+    min_revenue = df_map["region_total"].min()
 
-    try:
-        fig = px.choropleth(
-            df_map,
-            geojson=geojson,
-            featureidkey="properties.nazwa",
-            locations="region",
-            color="region_total",
-            color_continuous_scale="Blues",
-            hover_name="region",
-            hover_data={
-                "region_total": ":,.0f",
-                "hover_info": True,
-                "region": False
-            }
+    def get_color(revenue):
+        if pd.isna(revenue) or max_revenue == min_revenue:
+            return "#cccccc"
+        norm = (revenue - min_revenue) / (max_revenue - min_revenue)
+        # Gradient od jasnego do ciemnego niebieskiego
+        blue_intensity = int(255 * (1 - norm * 0.7))
+        return f"#00{blue_intensity:02x}ff"
+
+    # Utwórz mapę Folium
+    m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="OpenStreetMap")
+
+    # Dodaj choropleth
+    folium.GeoJson(
+        geojson,
+        name="województwa",
+        style_function=lambda feature: {
+            "fillColor": get_color(region_revenue_dict.get(feature["properties"]["nazwa"], None)),
+            "color": "black",
+            "weight": 1,
+            "fillOpacity": 0.7,
+        },
+        tooltip=folium.GeoJsonTooltip(
+            fields=["nazwa"],
+            aliases=["Województwo:"],
+            localize=True
         )
-        fig.update_geos(fitbounds="locations", visible=False)
-        fig.update_layout(height=700, margin={"r": 0, "t": 0, "l": 0, "b": 0})
+    ).add_to(m)
 
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"❌ Błąd podczas tworzenia mapy: {e}")
-        st.info("Sprawdź czy nazwy województw w danych pasują do nazw w pliku GeoJSON (pole 'properties.nazwa')")
-        return
+    # Dodaj dodatkowe informacje jako markery (opcjonalnie)
+    for _, row in df_map.iterrows():
+        # Tu możesz dodać popup z TOP produktami
+        popup_html = f"""
+        <b>{row['region']}</b><br>
+        Sprzedaż: {row['region_total']:,.0f} zł<br>
+        <br>
+        <b>TOP 5 produktów:</b><br>
+        {row['hover_info']}
+        """
+        # Znajdź centrum województwa (to wymaga dodatkowej logiki lub danych)
+
+    # Wyświetl mapę
+    st_folium(m, width=1200, height=700)
+
+    # Tabela podsumowująca
+    st.subheader("Podsumowanie sprzedaży po województwach")
+    summary = df_map.sort_values("region_total", ascending=False)
+    summary["region_total"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
+    st.dataframe(summary[["region", "region_total"]], use_container_width=True)
 # ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
