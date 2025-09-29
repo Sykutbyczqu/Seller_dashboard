@@ -18,7 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 st.set_page_config(page_title="Sprzedaż: WoW TOP (Allegro.pl / eBay.de) — Rozszerzone", layout="wide")
 st.title("🛒 Sprzedaż — Trendy i TOP N (Allegro.pl / eBay.de)")
 
-# Globalny config dla Plotly (używamy WYŁĄCZNIE parametru `config=...` w st.plotly_chart)
+# Używamy WYŁĄCZNIE parametru `config=` w st.plotly_chart
 PLOTLY_CONFIG = {
     "displaylogo": False,
     "modeBarButtonsToRemove": [
@@ -39,7 +39,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL (snapshot + trend jednorazowy)
+# 3) SQL (snapshot + trend)
 # ─────────────────────────────────────────────────────────────
 SQL_ALLEGRO_PLN = """
 WITH params AS (
@@ -374,11 +374,10 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
     return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
-# 7) Public query (snapshot) + trend (1 call)
+# 7) Public query (snapshot) + trend
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -> pd.DataFrame:
-    """Query data for specific platform - cache key includes platform for separate caching"""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -408,7 +407,7 @@ def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -
 
 @st.cache_data(ttl=600)
 def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
-    """Pobiera trendy w jednym zapytaniu: [week_from, week_to)."""
+    """Trend tygodniowy: pojedyncze zapytanie dla zakresu [week_from, week_to)."""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -434,11 +433,12 @@ def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int,
 
     df = _metabase_json_to_df(res["json"])
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    # normalizacja typów (ważne dla reindex)
+    if "week_start" in df.columns:
+        df["week_start"] = pd.to_datetime(df["week_start"]).dt.date
     for col in ["curr_rev", "curr_qty"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "week_start" in df.columns:
-        df["week_start"] = pd.to_datetime(df["week_start"])
     return df
 
 # ─────────────────────────────────────────────────────────────
@@ -460,23 +460,6 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         if pct <= -threshold * 2: return ("🔴⬇️", "#d32f2f")
         return ("🔴↓", "#ef5350")
     return ("⚪≈", "#9e9e9e")
-
-# Fallback (nieużywany domyślnie)
-@st.cache_data(ttl=600)
-def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
-    frames = []
-    for i in range(weeks):
-        ws_date = week_start_date - timedelta(weeks=i)
-        iso = ws_date.isoformat()
-        df_i = query_platform_data(sql_text, iso, f"{platform_key}_trend_{i}")
-        if df_i is None or df_i.empty:
-            continue
-        df_i = df_i.copy()
-        df_i["week_start"] = pd.to_datetime(ws_date)
-        frames.append(df_i)
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
@@ -582,7 +565,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         hovertext=hover
     ))
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150), autosize=True)
-    st.plotly_chart(fig, config=PLOTLY_CONFIG)  # ← tylko config
+    st.plotly_chart(fig, config=PLOTLY_CONFIG)
 
     # Waterfall
     st.subheader(f"📊 Wkład TOP produktów w zmianę sprzedaży (waterfall) - {currency}")
@@ -607,22 +590,25 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         totals=dict(marker=dict(color="#42a5f5"))
     )
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False, height=520, autosize=True)
-    st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)  # ← tylko config
+    st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)
 
-    # Trend tygodniowy
+    # ─────────────────────────────────────────────────────────
+    # Trend tygodniowy — identyczna logika dla Allegro i eBay
+    # ─────────────────────────────────────────────────────────
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
     df_trend = (
         query_platform_trend(sql_query_trend, week_start, weeks=weeks_back, platform_key=platform_key)
-        if sql_query_trend else
-        query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
+        if sql_query_trend else pd.DataFrame()
     )
 
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
     else:
-        all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
+        # Normalizacja typu (unikamy mieszania date/datetime)
+        df_trend["week_start"] = pd.to_datetime(df_trend["week_start"]).dt.date
 
+        all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
         search_term = st.text_input(f"Szukaj SKU lub produktu - {platform_name}", "", key=f"search_{platform_key}")
         filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()] if search_term else all_skus
 
@@ -637,19 +623,56 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                               key=f"chart_{platform_key}")
 
         if pick_skus:
-            df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
-            df_plot = df_plot.groupby(["week_start", "sku"])["curr_rev"].sum().reset_index()
-            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+            # 1) Sumy per tydzień i SKU (wartość + ilość)
+            df_plot = (
+                df_trend[df_trend["sku"].isin(pick_skus)]
+                .groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]]
+                .sum()
+            )
 
+            # 2) Pełna oś poniedziałków (ostatnie N tygodni) jako list[date]
+            full_weeks = [(week_start - timedelta(weeks=i)) for i in range(weeks_back - 1, -1, -1)]
+
+            # 3) Pivot + reindex do pełnej osi (uzupełniamy zera)
+            rev_pv = (df_plot.pivot(index="week_start", columns="sku", values="curr_rev")
+                               .reindex(full_weeks, fill_value=0))
+            qty_pv = (df_plot.pivot(index="week_start", columns="sku", values="curr_qty")
+                               .reindex(full_weeks, fill_value=0))
+
+            # 4) Rysunek + tooltip z ilością
             fig_tr = go.Figure()
-            for sku in pv.columns:
-                yvals = pv[sku].values
+            currency_symbol = "zł" if currency == "PLN" else "€"
+            x_vals = pd.to_datetime(rev_pv.index)  # oś X w datetime
+
+            for sku in rev_pv.columns:
+                yvals = rev_pv[sku].values
+                qvals = qty_pv[sku].values
+                common = dict(
+                    x=x_vals,
+                    y=yvals,
+                    name=sku,
+                    customdata=np.stack([qvals], axis=-1),
+                    hovertemplate=(
+                        "<b>%{fullData.name}</b><br>"
+                        "%{x|%Y-%m-%d}<br>"
+                        f"Sprzedaż: %{{y:,.0f}} {currency_symbol}<br>"
+                        "Ilość: %{customdata[0]:,.0f}"
+                        "<extra></extra>"
+                    )
+                )
                 if chart_type == "area":
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines", name=sku, stackgroup="one"))
+                    fig_tr.add_trace(go.Scatter(mode="lines", stackgroup="one", **common))
                 else:
-                    fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
-            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520, autosize=True)
-            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)  # ← tylko config
+                    fig_tr.add_trace(go.Scatter(mode="lines+markers", **common))
+
+            fig_tr.update_layout(
+                xaxis=dict(tickformat="%Y-%m-%d"),
+                yaxis_title=f"Sprzedaż ({currency})",
+                height=520,
+                autosize=True,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
