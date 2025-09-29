@@ -597,7 +597,7 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
 
 @st.cache_data(ttl=600)
 def query_poland_zip_full(week_start_iso: str) -> pd.DataFrame:
-    """Pobiera pełne dane przez CSV endpoint - bez limitu 2000 wierszy."""
+    """Pobiera pełne dane - obchodzi limit 2000 wierszy."""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -643,15 +643,15 @@ ORDER BY receiver_zip, revenue DESC;
     payload = {
         "database": METABASE_DATABASE_ID,
         "type": "native",
-        "native": {"query": sql}
+        "native": {"query": sql},
+        "constraints": {"max-results": 1000000}  # Ustaw wysoki limit
     }
 
     headers = {"X-Metabase-Session": session}
 
     try:
-        # Pobierz jako CSV
         r = requests.post(
-            f"{METABASE_URL}/api/dataset/csv",
+            f"{METABASE_URL}/api/dataset",
             headers=headers,
             json=payload,
             timeout=180
@@ -664,35 +664,43 @@ ORDER BY receiver_zip, revenue DESC;
                 return pd.DataFrame()
             headers = {"X-Metabase-Session": session}
             r = requests.post(
-                f"{METABASE_URL}/api/dataset/csv",
+                f"{METABASE_URL}/api/dataset",
                 headers=headers,
                 json=payload,
                 timeout=180
             )
 
         if r.status_code == 200:
-            from io import StringIO
-            df = pd.read_csv(StringIO(r.text))
-
-            # Standaryzuj nazwy kolumn
+            data = r.json()
+            df = _metabase_json_to_df(data)
             df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
 
-            # Konwertuj typy
             if "revenue" in df.columns:
                 df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
 
-            st.success(f"✅ Pobrano {len(df):,} wierszy | Suma: {df['revenue'].sum():,.0f} zł")
+            st.success(f"Pobrano {len(df):,} wierszy | Suma: {df.get('revenue', pd.Series([0])).sum():,.0f} zł")
             return df
 
         elif r.status_code == 202:
-            st.warning("Zapytanie w trakcie przetwarzania (202). Spróbuj ponownie za chwilę.")
+            # Asynchroniczne przetwarzanie
+            data = r.json()
+            # Jeśli są już wiersze w odpowiedzi 202
+            if isinstance(data, dict) and "data" in data and "rows" in data["data"]:
+                df = _metabase_json_to_df(data)
+                df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+                if "revenue" in df.columns:
+                    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
+                st.info(f"Częściowe dane (202): {len(df):,} wierszy")
+                return df
+
+            st.warning("Zapytanie w trakcie przetwarzania. Odśwież stronę za chwilę.")
             return pd.DataFrame()
         else:
-            st.error(f"Błąd {r.status_code}: {r.text[:300]}")
+            st.error(f"Błąd {r.status_code}: {r.text[:500]}")
             return pd.DataFrame()
 
     except Exception as e:
-        st.error(f"Błąd pobierania danych: {e}")
+        st.error(f"Błąd: {e}")
         return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
