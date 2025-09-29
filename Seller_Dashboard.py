@@ -87,7 +87,7 @@ ZIP_TO_REGION = {
     "10": "Warmińsko-Mazurskie", "11": "Warmińsko-Mazurskie", "12": "Warmińsko-Mazurskie", "13": "Warmińsko-Mazurskie", "14": "Warmińsko-Mazurskie",
 }
 
-SQL_WOW_POLAND_REGIONS = """
+SQL_WOW_POLAND_ZIP = """
 WITH params AS (
   SELECT
     {{week_start}}::date AS week_start,
