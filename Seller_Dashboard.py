@@ -18,7 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 st.set_page_config(page_title="Sprzedaż: WoW TOP (Allegro.pl / eBay.de) — Rozszerzone", layout="wide")
 st.title("🛒 Sprzedaż — Trendy i TOP N (Allegro.pl / eBay.de)")
 
-# Globalny config dla Plotly (używamy WYŁĄCZNIE parametru `config=...` w st.plotly_chart)
+# Globalny config dla Plotly (tylko param `config` w st.plotly_chart)
 PLOTLY_CONFIG = {
     "displaylogo": False,
     "modeBarButtonsToRemove": [
@@ -39,7 +39,7 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL (snapshot + trend jednorazowy)
+# 3) SQL (snapshot + trend tygodniowy + trend dzienny)
 # ─────────────────────────────────────────────────────────────
 SQL_ALLEGRO_PLN = """
 WITH params AS (
@@ -177,7 +177,8 @@ LEFT JOIN prev p ON p.sku = c.sku
 ORDER BY c.curr_rev DESC
 """
 
-SQL_ALLEGRO_TREND = """
+# Trend tygodniowy — 1 zapytanie (jak wcześniej)
+SQL_ALLEGRO_TREND_WEEK = """
 WITH params AS (
   SELECT
     {{week_from}}::date AS week_from,
@@ -222,7 +223,7 @@ HAVING l.sku IS NOT NULL
 ORDER BY w.week_start ASC, curr_rev DESC;
 """
 
-SQL_EBAY_TREND = """
+SQL_EBAY_TREND_WEEK = """
 WITH params AS (
   SELECT
     {{week_from}}::date AS week_from,
@@ -265,6 +266,97 @@ LEFT JOIN lines l
 GROUP BY l.sku, w.week_start
 HAVING l.sku IS NOT NULL
 ORDER BY w.week_start ASC, curr_rev DESC;
+"""
+
+# Trend dzienny — 1 zapytanie (zakres dat)
+SQL_ALLEGRO_TREND_DAY = """
+WITH params AS (
+  SELECT
+    {{date_from}}::date AS date_from,
+    {{date_to}}::date   AS date_to
+),
+lines AS (
+  SELECT
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date) AT TIME ZONE 'Europe/Warsaw') AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+),
+d AS (
+  SELECT generate_series(
+           (SELECT date_from FROM params),
+           (SELECT date_to   FROM params) - INTERVAL '1 day',
+           INTERVAL '1 day'
+         ) AS day_start
+)
+SELECT
+  l.sku,
+  MAX(l.product_name) AS product_name,
+  d.day_start::date   AS day,
+  SUM(l.line_total)   AS curr_rev,
+  SUM(l.qty)          AS curr_qty
+FROM d
+LEFT JOIN lines l
+  ON l.order_ts >= d.day_start
+ AND l.order_ts <  d.day_start + INTERVAL '1 day'
+GROUP BY l.sku, d.day_start
+HAVING l.sku IS NOT NULL
+ORDER BY d.day_start ASC, curr_rev DESC;
+"""
+
+SQL_EBAY_TREND_DAY = """
+WITH params AS (
+  SELECT
+    {{date_from}}::date AS date_from,
+    {{date_to}}::date   AS date_to
+),
+lines AS (
+  SELECT
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date) AT TIME ZONE 'Europe/Warsaw') AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%eBay%'
+),
+d AS (
+  SELECT generate_series(
+           (SELECT date_from FROM params),
+           (SELECT date_to   FROM params) - INTERVAL '1 day',
+           INTERVAL '1 day'
+         ) AS day_start
+)
+SELECT
+  l.sku,
+  MAX(l.product_name) AS product_name,
+  d.day_start::date   AS day,
+  SUM(l.line_total)   AS curr_rev,
+  SUM(l.qty)          AS curr_qty
+FROM d
+LEFT JOIN lines l
+  ON l.order_ts >= d.day_start
+ AND l.order_ts <  d.day_start + INTERVAL '1 day'
+GROUP BY l.sku, d.day_start
+HAVING l.sku IS NOT NULL
+ORDER BY d.day_start ASC, curr_rev DESC;
 """
 
 # ─────────────────────────────────────────────────────────────
@@ -374,11 +466,10 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
     return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
-# 7) Public query (snapshot) + trend (1 call)
+# 7) Public query (snapshot) + trend tygodniowy + trend dzienny
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -> pd.DataFrame:
-    """Query data for specific platform - cache key includes platform for separate caching"""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -407,8 +498,8 @@ def query_platform_data(sql_text: str, week_start_iso: str, platform_key: str) -
     return df
 
 @st.cache_data(ttl=600)
-def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
-    """Pobiera trendy w jednym zapytaniu: [week_from, week_to)."""
+def query_platform_trend_week(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
+    """Trend tygodniowy: [week_from, week_to)."""
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -416,17 +507,17 @@ def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int,
     week_from = (week_start_date - timedelta(weeks=weeks - 1)).isoformat()
     week_to   = (week_start_date + timedelta(days=7)).isoformat()
 
-    res = _dataset_call(sql_trend_text, {"week_from": week_from, "week_to": week_to}, session)
+    res = _dataset_call(sql_text, {"week_from": week_from, "week_to": week_to}, session)
     if res["status"] == 401:
         get_metabase_session.clear()
         session = get_metabase_session()
         if not session:
             st.error("❌ Nie udało się odświeżyć sesji Metabase (trend).")
             return pd.DataFrame()
-        res = _dataset_call(sql_trend_text, {"week_from": week_from, "week_to": week_to}, session)
+        res = _dataset_call(sql_text, {"week_from": week_from, "week_to": week_to}, session)
 
-    st.session_state[f"mb_last_status_{platform_key}_trend"] = res["status"]
-    st.session_state[f"mb_last_json_{platform_key}_trend"] = res["json"]
+    st.session_state[f"mb_last_status_{platform_key}_trend_week"] = res["status"]
+    st.session_state[f"mb_last_json_{platform_key}_trend_week"] = res["json"]
 
     if res["status"] not in (200, 202) or not res["json"]:
         st.error(f"❌ Metabase (trend) HTTP {res['status']}: {str(res.get('text', ''))[:300]}")
@@ -439,6 +530,38 @@ def query_platform_trend(sql_trend_text: str, week_start_date: date, weeks: int,
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "week_start" in df.columns:
         df["week_start"] = pd.to_datetime(df["week_start"])
+    return df
+
+@st.cache_data(ttl=600)
+def query_platform_trend_day(sql_text: str, date_from: date, date_to: date, platform_key: str) -> pd.DataFrame:
+    """Trend dzienny: [date_from, date_to)"""
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+
+    res = _dataset_call(sql_text, {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}, session)
+    if res["status"] == 401:
+        get_metabase_session.clear()
+        session = get_metabase_session()
+        if not session:
+            st.error("❌ Nie udało się odświeżyć sesji Metabase (trend dzienny).")
+            return pd.DataFrame()
+        res = _dataset_call(sql_text, {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}, session)
+
+    st.session_state[f"mb_last_status_{platform_key}_trend_day"] = res["status"]
+    st.session_state[f"mb_last_json_{platform_key}_trend_day"] = res["json"]
+
+    if res["status"] not in (200, 202) or not res["json"]:
+        st.error(f"❌ Metabase (trend dzienny) HTTP {res['status']}: {str(res.get('text', ''))[:300]}")
+        return pd.DataFrame()
+
+    df = _metabase_json_to_df(res["json"])
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    for col in ["curr_rev", "curr_qty"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "day" in df.columns:
+        df["day"] = pd.to_datetime(df["day"])
     return df
 
 # ─────────────────────────────────────────────────────────────
@@ -460,23 +583,6 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         if pct <= -threshold * 2: return ("🔴⬇️", "#d32f2f")
         return ("🔴↓", "#ef5350")
     return ("⚪≈", "#9e9e9e")
-
-# Fallback (nieużywany domyślnie)
-@st.cache_data(ttl=600)
-def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
-    frames = []
-    for i in range(weeks):
-        ws_date = week_start_date - timedelta(weeks=i)
-        iso = ws_date.isoformat()
-        df_i = query_platform_data(sql_text, iso, f"{platform_key}_trend_{i}")
-        if df_i is None or df_i.empty:
-            continue
-        df_i = df_i.copy()
-        df_i["week_start"] = pd.to_datetime(ws_date)
-        frames.append(df_i)
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
@@ -505,7 +611,14 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
 # ─────────────────────────────────────────────────────────────
 # 9) Render platformy
 # ─────────────────────────────────────────────────────────────
-def render_platform_analysis(platform_name: str, sql_query: str, currency: str, platform_key: str, sql_query_trend: str | None = None):
+def render_platform_analysis(
+    platform_name: str,
+    sql_query: str,
+    currency: str,
+    platform_key: str,
+    sql_query_trend_week: str | None = None,
+    sql_query_trend_day: str | None = None
+):
     st.sidebar.header(f"🔎 Filtry ({platform_name})")
     default_week = last_completed_week_start()
     pick_day = st.sidebar.date_input(f"Wybierz tydzień ({platform_name})", value=default_week,
@@ -582,7 +695,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         hovertext=hover
     ))
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150), autosize=True)
-    st.plotly_chart(fig, config=PLOTLY_CONFIG)  # ← tylko config
+    st.plotly_chart(fig, config=PLOTLY_CONFIG)
 
     # Waterfall
     st.subheader(f"📊 Wkład TOP produktów w zmianę sprzedaży (waterfall) - {currency}")
@@ -607,22 +720,37 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         totals=dict(marker=dict(color="#42a5f5"))
     )
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False, height=520, autosize=True)
-    st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)  # ← tylko config
+    st.plotly_chart(fig_wf, config=PLOTLY_CONFIG)
 
-    # Trend tygodniowy
-    st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
-
-    df_trend = (
-        query_platform_trend(sql_query_trend, week_start, weeks=weeks_back, platform_key=platform_key)
-        if sql_query_trend else
-        query_trend_many_weeks(sql_query, week_start, weeks=weeks_back, platform_key=platform_key)
+    # Trend: tygodniowy vs dzienny
+    st.subheader("📈 Trendy — wybierz granularność i SKU")
+    granularity = st.radio(
+        f"Agregacja trendu - {platform_name}",
+        ["tydzień", "dzień"],
+        index=0,
+        horizontal=True,
+        key=f"gran_{platform_key}"
     )
 
-    if df_trend.empty:
-        st.info("Brak danych trendu (dla wybranej liczby tygodni).")
-    else:
-        all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
+    # Zakres dat dla trendu dziennego (te same ramy co tygodniowy slider w tygodniach)
+    date_from = week_start - timedelta(weeks=weeks_back - 1)
+    date_to = week_end  # półotwarty przedział [from, to)
 
+    if granularity == "tydzień" and sql_query_trend_week:
+        df_trend = query_platform_trend_week(sql_query_trend_week, week_start, weeks=weeks_back, platform_key=platform_key)
+        time_col = "week_start"
+    elif granularity == "dzień" and sql_query_trend_day:
+        df_trend = query_platform_trend_day(sql_query_trend_day, date_from=date_from, date_to=date_to, platform_key=platform_key)
+        time_col = "day"
+    else:
+        df_trend = pd.DataFrame()
+        time_col = None
+
+    if df_trend.empty or not time_col:
+        st.info("Brak danych trendu dla wybranych ustawień.")
+    else:
+        # Lista SKU + filtr tekstowy
+        all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
         search_term = st.text_input(f"Szukaj SKU lub produktu - {platform_name}", "", key=f"search_{platform_key}")
         filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()] if search_term else all_skus
 
@@ -633,13 +761,18 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
             key=f"multiselect_{platform_key}"
         )
 
-        chart_type = st.radio(f"Typ wykresu - {platform_name}", ["area", "line"], index=0, horizontal=True,
-                              key=f"chart_{platform_key}")
+        chart_type = st.radio(
+            f"Typ wykresu - {platform_name}",
+            ["area", "line"],
+            index=0,
+            horizontal=True,
+            key=f"chart_{platform_key}"
+        )
 
         if pick_skus:
             df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
-            df_plot = df_plot.groupby(["week_start", "sku"])["curr_rev"].sum().reset_index()
-            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+            df_plot = df_plot.groupby([time_col, "sku"])["curr_rev"].sum().reset_index()
+            pv = df_plot.pivot(index=time_col, columns="sku", values="curr_rev").fillna(0).sort_index()
 
             fig_tr = go.Figure()
             for sku in pv.columns:
@@ -648,8 +781,13 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                     fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines", name=sku, stackgroup="one"))
                 else:
                     fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
-            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520, autosize=True)
-            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)  # ← tylko config
+            fig_tr.update_layout(
+                xaxis=dict(tickformat="%Y-%m-%d"),
+                yaxis_title=f"Sprzedaż ({currency})",
+                height=520,
+                autosize=True
+            )
+            st.plotly_chart(fig_tr, config=PLOTLY_CONFIG)
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
@@ -729,7 +867,8 @@ with tab1:
         sql_query=SQL_ALLEGRO_PLN,
         currency="PLN",
         platform_key="allegro",
-        sql_query_trend=SQL_ALLEGRO_TREND
+        sql_query_trend_week=SQL_ALLEGRO_TREND_WEEK,
+        sql_query_trend_day=SQL_ALLEGRO_TREND_DAY
     )
 
 with tab2:
@@ -739,5 +878,6 @@ with tab2:
         sql_query=SQL_EBAY_EUR,
         currency="EUR",
         platform_key="ebay",
-        sql_query_trend=SQL_EBAY_TREND
+        sql_query_trend_week=SQL_EBAY_TREND_WEEK,
+        sql_query_trend_day=SQL_EBAY_TREND_DAY
     )
