@@ -617,13 +617,12 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
                 custom = np.column_stack([q, wow_abs, wow_pct, week_end_labels])
 
                 hovertemplate = (
-                    "<b>%{fullData.name}</b><br>"
-                    "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
-                    f"Sprzedaż: %{y:,.0f} {currency_symbol}<br>"
-                    "Ilość: %{customdata[0]:,.0f} szt.<br>"
-                    f"WoW: %{customdata[1]:+,.0f} {currency_symbol} "
-                    "(%{customdata[2]:+.0f}%)"
-                    "<extra></extra>"
+                        "<b>%{fullData.name}</b><br>"
+                        "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
+                        "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
+                                                                   "Ilość: %{customdata[0]:,.0f} szt.<br>"
+                                                                   "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
+                                                                                                                      "<extra></extra>"
                 )
 
                 if chart_type == "area":
