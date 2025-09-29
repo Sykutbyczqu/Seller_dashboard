@@ -613,7 +613,7 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
                 wow_abs = y - prev
                 wow_pct = np.where((prev > 0) & np.isfinite(prev), (y - prev) / prev * 100.0, np.nan)
 
-                # customdata: [qty, wow_abs, wow_pct, week_end_label]
+                #customdata: [qty, wow_abs, wow_pct, week_end_label]
                 custom = np.column_stack([q, wow_abs, wow_pct, week_end_labels])
 
                 hovertemplate = (
