@@ -3,7 +3,8 @@ import io
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
-
+import json
+import plotly.express as px
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -481,6 +482,18 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8)
     if frames:
         return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
+@st.cache_data(ttl=600)
+def query_poland_regions(week_start_iso: str) -> pd.DataFrame:
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+    res = _dataset_call(SQL_WOW_POLAND_REGIONS, {"week_start": week_start_iso}, session)
+    if res["status"] != 200 or not res["json"]:
+        return pd.DataFrame()
+    df = _metabase_json_to_df(res["json"])
+    df.columns = [c.lower() for c in df.columns]
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0.0)
+    return df
 
 # ─────────────────────────────────────────────────────────────
 # 8) UI — wspólne filtry
@@ -802,10 +815,53 @@ def render_platform(platform_key: str,
             st.subheader("Raw JSON (Metabase)")
             st.json(st.session_state.get("mb_last_json"))
 
+# Mapa polski
+def render_poland_map():
+    st.header("🗺️ Sprzedaż wg województw")
+
+    df = query_poland_regions(week_start.isoformat())
+    if df.empty:
+        st.warning("Brak danych dla Polski.")
+        return
+
+    # TOP 5 per region
+    top_texts = {}
+    for region, g in df.groupby("region"):
+        g_sorted = g.sort_values("revenue", ascending=False)
+        total = g_sorted["revenue"].sum()
+        top5 = g_sorted.head(5)
+        lines = []
+        for _, row in top5.iterrows():
+            share = row["revenue"] / total * 100 if total > 0 else 0
+            lines.append(f"{row['sku']} ({share:.1f}%)")
+        top_texts[region] = "<br>".join(lines)
+
+    df_total = df.groupby("region", as_index=False)["revenue"].sum()
+    df_total["hover"] = df_total["region"].map(top_texts)
+
+    # GeoJSON map for Polish voivodeships
+    # Możesz użyć gotowego geojson np. z https://github.com/datasets/geo-boundaries-world-110m
+    with open("poland_voivodeships.geojson", "r", encoding="utf-8") as f:
+        geojson = json.load(f)
+
+    fig = px.choropleth(
+        df_total,
+        geojson=geojson,
+        featureidkey="properties.nazwa",  # dopasuj do pola w geojson
+        locations="region",
+        color="revenue",
+        color_continuous_scale="Blues",
+        hover_name="region",
+        hover_data={"revenue":":,.0f", "hover":True, "region":False}
+    )
+    fig.update_geos(fitbounds="locations", visible=False)
+    fig.update_layout(height=720, margin={"r":0,"t":0,"l":0,"b":0})
+
+    st.plotly_chart(fig, use_container_width=True)
 # ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
-tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)"])
+tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)","🇵🇱 Polska — mapa wg województw"])
 
 with tabs[0]:
     render_platform(
@@ -836,3 +892,5 @@ with tabs[2]:
         currency_label="EUR",
         currency_symbol="€",
     )
+with tabs[3]:
+    render_poland_map()
