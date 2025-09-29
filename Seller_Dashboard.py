@@ -1,5 +1,6 @@
 # streamlit_app.py
 import io
+import os
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -32,59 +33,61 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 # ─────────────────────────────────────────────────────────────
 # 3) SQL — snapshoty WoW (po jednym na platformę)
 # ─────────────────────────────────────────────────────────────
-ZIP_TO_REGION = {
-    # Mazowieckie
-    "00": "Mazowieckie", "01": "Mazowieckie", "02": "Mazowieckie", "03": "Mazowieckie", "04": "Mazowieckie",
-    "05": "Mazowieckie", "06": "Mazowieckie", "07": "Mazowieckie", "08": "Mazowieckie", "09": "Mazowieckie",
-
-    # Łódzkie
-    "90": "Łódzkie", "91": "Łódzkie", "92": "Łódzkie", "93": "Łódzkie", "94": "Łódzkie",
-    "95": "Łódzkie", "96": "Łódzkie", "97": "Łódzkie", "98": "Łódzkie", "99": "Łódzkie",
-
-    # Śląskie
-    "40": "Śląskie", "41": "Śląskie", "42": "Śląskie", "43": "Śląskie", "44": "Śląskie",
-    "45": "Śląskie", "46": "Śląskie", "47": "Śląskie", "48": "Śląskie", "49": "Śląskie",
-
-    # Dolnośląskie
-    "50": "Dolnośląskie", "51": "Dolnośląskie", "52": "Dolnośląskie", "53": "Dolnośląskie",
-    "54": "Dolnośląskie", "55": "Dolnośląskie", "56": "Dolnośląskie", "57": "Dolnośląskie", "58": "Dolnośląskie", "59": "Dolnośląskie",
-
-    # Wielkopolskie
-    "60": "Wielkopolskie", "61": "Wielkopolskie", "62": "Wielkopolskie", "63": "Wielkopolskie",
-    "64": "Wielkopolskie", "65": "Wielkopolskie", "66": "Wielkopolskie",
+ZIP_TO_REGION = ZIP_TO_REGION = {
+    # Dolnoslaskie
+    "50": "Dolnoslaskie", "51": "Dolnoslaskie", "52": "Dolnoslaskie", "53": "Dolnoslaskie",
+    "54": "Dolnoslaskie", "55": "Dolnoslaskie", "56": "Dolnoslaskie", "57": "Dolnoslaskie",
+    "58": "Dolnoslaskie", "59": "Dolnoslaskie",
 
     # Kujawsko-Pomorskie
     "85": "Kujawsko-Pomorskie", "86": "Kujawsko-Pomorskie", "87": "Kujawsko-Pomorskie", "88": "Kujawsko-Pomorskie",
 
-    # Pomorskie
-    "80": "Pomorskie", "81": "Pomorskie", "82": "Pomorskie", "83": "Pomorskie", "84": "Pomorskie",
-
-    # Zachodniopomorskie
-    "70": "Zachodniopomorskie", "71": "Zachodniopomorskie", "72": "Zachodniopomorskie", "73": "Zachodniopomorskie", "74": "Zachodniopomorskie", "75": "Zachodniopomorskie", "76": "Zachodniopomorskie", "77": "Zachodniopomorskie", "78": "Zachodniopomorskie",
-
     # Lubelskie
     "20": "Lubelskie", "21": "Lubelskie", "22": "Lubelskie", "23": "Lubelskie", "24": "Lubelskie",
-
-    # Małopolskie
-    "30": "Małopolskie", "31": "Małopolskie", "32": "Małopolskie", "33": "Małopolskie", "34": "Małopolskie",
-
-    # Podkarpackie
-    "35": "Podkarpackie", "36": "Podkarpackie", "37": "Podkarpackie", "38": "Podkarpackie", "39": "Podkarpackie",
-
-    # Świętokrzyskie
-    "25": "Świętokrzyskie", "26": "Świętokrzyskie", "27": "Świętokrzyskie", "28": "Świętokrzyskie", "29": "Świętokrzyskie",
-
-    # Podlaskie
-    "15": "Podlaskie", "16": "Podlaskie", "17": "Podlaskie", "18": "Podlaskie", "19": "Podlaskie",
 
     # Lubuskie
     "65": "Lubuskie", "66": "Lubuskie", "67": "Lubuskie", "68": "Lubuskie", "69": "Lubuskie",
 
+    # Lodzkie
+    "90": "Lodzkie", "91": "Lodzkie", "92": "Lodzkie", "93": "Lodzkie", "94": "Lodzkie",
+    "95": "Lodzkie", "96": "Lodzkie", "97": "Lodzkie", "98": "Lodzkie", "99": "Lodzkie",
+
+    # Malopolskie
+    "30": "Malopolskie", "31": "Malopolskie", "32": "Malopolskie", "33": "Malopolskie", "34": "Malopolskie",
+
+    # Mazowieckie
+    "00": "Mazowieckie", "01": "Mazowieckie", "02": "Mazowieckie", "03": "Mazowieckie", "04": "Mazowieckie",
+    "05": "Mazowieckie", "06": "Mazowieckie", "07": "Mazowieckie", "08": "Mazowieckie", "09": "Mazowieckie",
+
     # Opolskie
     "45": "Opolskie", "46": "Opolskie", "47": "Opolskie", "48": "Opolskie", "49": "Opolskie",
 
-    # Warmińsko-Mazurskie
-    "10": "Warmińsko-Mazurskie", "11": "Warmińsko-Mazurskie", "12": "Warmińsko-Mazurskie", "13": "Warmińsko-Mazurskie", "14": "Warmińsko-Mazurskie",
+    # Podkarpackie
+    "35": "Podkarpackie", "36": "Podkarpackie", "37": "Podkarpackie", "38": "Podkarpackie", "39": "Podkarpackie",
+
+    # Podlaskie
+    "15": "Podlaskie", "16": "Podlaskie", "17": "Podlaskie", "18": "Podlaskie", "19": "Podlaskie",
+
+    # Pomorskie
+    "80": "Pomorskie", "81": "Pomorskie", "82": "Pomorskie", "83": "Pomorskie", "84": "Pomorskie",
+
+    # Slaskie
+    "40": "Slaskie", "41": "Slaskie", "42": "Slaskie", "43": "Slaskie", "44": "Slaskie",
+
+    # Swietokrzyskie
+    "25": "Swietokrzyskie", "26": "Swietokrzyskie", "27": "Swietokrzyskie", "28": "Swietokrzyskie", "29": "Swietokrzyskie",
+
+    # Warminsko-Mazurskie
+    "10": "Warminsko-Mazurskie", "11": "Warminsko-Mazurskie", "12": "Warminsko-Mazurskie",
+    "13": "Warminsko-Mazurskie", "14": "Warminsko-Mazurskie",
+
+    # Wielkopolskie
+    "60": "Wielkopolskie", "61": "Wielkopolskie", "62": "Wielkopolskie", "63": "Wielkopolskie", "64": "Wielkopolskie",
+
+    # Zachodniopomorskie
+    "70": "Zachodniopomorskie", "71": "Zachodniopomorskie", "72": "Zachodniopomorskie",
+    "73": "Zachodniopomorskie", "74": "Zachodniopomorskie", "75": "Zachodniopomorskie",
+    "76": "Zachodniopomorskie", "77": "Zachodniopomorskie", "78": "Zachodniopomorskie",
 }
 
 SQL_WOW_POLAND_ZIP = """
@@ -924,7 +927,8 @@ def render_poland_map(week_start: date):
         return
 
     grouped = df.groupby(["region", "sku"], as_index=False).agg({"revenue": "sum"})
-    region_totals = grouped.groupby("region", as_index=False)["revenue"].sum().rename(columns={"revenue": "region_total"})
+    region_totals = grouped.groupby("region", as_index=False)["revenue"].sum().rename(
+        columns={"revenue": "region_total"})
     grouped = grouped.merge(region_totals, on="region", how="left")
     grouped["share_pct"] = grouped["revenue"] / grouped["region_total"] * 100
 
@@ -938,28 +942,60 @@ def render_poland_map(week_start: date):
     df_map = region_totals.copy()
     df_map["hover_info"] = df_map["region"].map(hover_text)
 
-    geojson_path = "polska-wojewodztwa.geojson"
-    with open(geojson_path, "r", encoding="utf-8") as f:
-        geojson = json.load(f)
+    geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
 
-    fig = px.choropleth(
-        df_map,
-        geojson=geojson,
-        featureidkey="properties.nazwa",
-        locations="region",
-        color="region_total",
-        color_continuous_scale="Blues",
-        hover_name="region",
-        hover_data={
-            "region_total": ":,.0f",
-            "hover_info": True,
-            "region": False
-        }
-    )
-    fig.update_geos(fitbounds="locations", visible=False)
-    fig.update_layout(height=700, margin={"r":0,"t":0,"l":0,"b":0})
+    # Sprawdź czy plik istnieje
+    if not os.path.exists(geojson_path):
+        st.error(f"❌ Nie znaleziono pliku GeoJSON: {geojson_path}")
+        st.info("Upewnij się, że plik 'polska-wojewodztwa.geojson' znajduje się w tym samym katalogu co skrypt.")
+        return
 
-    st.plotly_chart(fig, use_container_width=True)
+    # Próba wczytania pliku
+    try:
+        with open(geojson_path, "r", encoding="utf-8") as f:
+            geojson = json.load(f)
+    except json.JSONDecodeError as e:
+        st.error(f"❌ Błąd parsowania pliku GeoJSON: {e}")
+        st.info("Sprawdź czy plik GeoJSON ma poprawny format JSON.")
+        return
+    except Exception as e:
+        st.error(f"❌ Błąd wczytywania pliku GeoJSON: {e}")
+        return
+
+    # Sprawdź strukturę GeoJSON
+    if not isinstance(geojson, dict) or "features" not in geojson:
+        st.error("❌ Niepoprawna struktura pliku GeoJSON - brak pola 'features'")
+        return
+
+    # Opcjonalnie: wyświetl debug info o nazwach w GeoJSON
+    if debug_api:
+        geojson_names = [f.get("properties", {}).get("nazwa", "BRAK") for f in geojson.get("features", [])]
+        st.write("Nazwy województw w GeoJSON:", geojson_names)
+        st.write("Nazwy województw w danych:", df_map["region"].unique().tolist())
+
+    try:
+        fig = px.choropleth(
+            df_map,
+            geojson=geojson,
+            featureidkey="properties.nazwa",
+            locations="region",
+            color="region_total",
+            color_continuous_scale="Blues",
+            hover_name="region",
+            hover_data={
+                "region_total": ":,.0f",
+                "hover_info": True,
+                "region": False
+            }
+        )
+        fig.update_geos(fitbounds="locations", visible=False)
+        fig.update_layout(height=700, margin={"r": 0, "t": 0, "l": 0, "b": 0})
+
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"❌ Błąd podczas tworzenia mapy: {e}")
+        st.info("Sprawdź czy nazwy województw w danych pasują do nazw w pliku GeoJSON (pole 'properties.nazwa')")
+        return
 # ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
