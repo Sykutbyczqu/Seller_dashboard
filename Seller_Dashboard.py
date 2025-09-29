@@ -18,6 +18,17 @@ from matplotlib.backends.backend_pdf import PdfPages
 st.set_page_config(page_title="Sprzedaż: WoW TOP (Allegro.pl / eBay.de) — Rozszerzone", layout="wide")
 st.title("🛒 Sprzedaż — Trendy i TOP N (Allegro.pl / eBay.de)")
 
+# Globalny config dla Plotly (zamiast przekazywania pojedynczych opcji jako kwargs)
+PLOTLY_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": [
+        "lasso2d", "select2d", "zoom2d", "zoomIn2d", "zoomOut2d",
+        "autoScale2d", "resetScale2d", "toImage"
+    ],
+    "scrollZoom": False,
+    "responsive": True,
+}
+
 # ─────────────────────────────────────────────────────────────
 # 2) Ustawienia Metabase (przykładowe - w runtime użyj st.secrets)
 # ─────────────────────────────────────────────────────────────
@@ -451,10 +462,9 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         return ("🔴↓", "#ef5350")
     return ("⚪≈", "#9e9e9e")
 
-# Stare API wielo-zapytaniowe zostawione jako fallback (nieużywane, ale może się przydać)
+# Fallback (stare wielokrotne zapytania)
 @st.cache_data(ttl=600)
 def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, platform_key: str) -> pd.DataFrame:
-    """Query trend data for multiple weeks - cache key includes platform"""
     frames = []
     for i in range(weeks):
         ws_date = week_start_date - timedelta(weeks=i)
@@ -466,8 +476,7 @@ def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int, pla
         df_i["week_start"] = pd.to_datetime(ws_date)
         frames.append(df_i)
     if frames:
-        all_df = pd.concat(frames, ignore_index=True)
-        return all_df
+        return pd.concat(frames, ignore_index=True)
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -498,9 +507,6 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
 # 9) Funkcja do renderowania zawartości zakładki
 # ─────────────────────────────────────────────────────────────
 def render_platform_analysis(platform_name: str, sql_query: str, currency: str, platform_key: str, sql_query_trend: str | None = None):
-    """Renderuje pełną analizę dla danej platformy"""
-
-    # Filtry w sidebarze (wspólne dla obu platform)
     st.sidebar.header(f"🔎 Filtry ({platform_name})")
     default_week = last_completed_week_start()
     pick_day = st.sidebar.date_input(f"Wybierz tydzień ({platform_name})", value=default_week,
@@ -521,7 +527,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
 
     st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw  •  Waluta: {currency}")
 
-    # Pobranie danych (snapshot)
+    # Snapshot
     df = query_platform_data(sql_query, week_start.isoformat(), platform_key)
 
     if debug_api:
@@ -540,7 +546,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         st.dataframe(df.head(), width='stretch', hide_index=True)
         return
 
-    # Ranking TOP N
+    # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
 
     # Klasyfikacja zmian
@@ -577,7 +583,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         hovertext=hover
     ))
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150))
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
 
     # Waterfall
     st.subheader(f"📊 Wkład TOP produktów w zmianę sprzedaży (waterfall) - {currency}")
@@ -602,7 +608,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
         totals=dict(marker=dict(color="#42a5f5"))
     )
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency})", showlegend=False)
-    st.plotly_chart(fig_wf, width='stretch')
+    st.plotly_chart(fig_wf, width='stretch', config=PLOTLY_CONFIG)
 
     # Trend tygodniowy
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
@@ -646,7 +652,7 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
                 else:
                     fig_tr.add_trace(go.Scatter(x=pv.index, y=yvals, mode="lines+markers", name=sku))
             fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency})", height=520)
-            st.plotly_chart(fig_tr, width='stretch')
+            st.plotly_chart(fig_tr, width='stretch', config=PLOTLY_CONFIG)
 
     # Tabele wzrostów/spadków
     COLS_DISPLAY = {
@@ -719,8 +725,6 @@ def render_platform_analysis(platform_name: str, sql_query: str, currency: str, 
 # ─────────────────────────────────────────────────────────────
 # 10) Główna aplikacja z zakładkami
 # ─────────────────────────────────────────────────────────────
-
-# CSS dla lepszego wyglądu zakładek
 st.markdown("""
     <style>
     .sticky-kpi {
@@ -745,7 +749,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Tworzenie zakładek
 tab1, tab2 = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)"])
 
 with tab1:
