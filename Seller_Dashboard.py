@@ -934,7 +934,6 @@ def render_poland_map(week_start: date):
     grouped = grouped.merge(region_totals, on="region", how="left")
     grouped["share_pct"] = grouped["revenue"] / grouped["region_total"] * 100
 
-    # Przygotuj dane dla tooltipów
     hover_text = {}
     for region, sub in grouped.groupby("region"):
         sub_sorted = sub.sort_values("revenue", ascending=False).reset_index(drop=True)
@@ -945,7 +944,6 @@ def render_poland_map(week_start: date):
     df_map = region_totals.copy()
     df_map["hover_info"] = df_map["region"].map(hover_text)
 
-    # Wczytaj GeoJSON
     import os
     geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
 
@@ -960,30 +958,28 @@ def render_poland_map(week_start: date):
         st.error(f"Błąd wczytywania GeoJSON: {e}")
         return
 
-    # Stwórz słownik region -> revenue dla koloru
     region_revenue_dict = df_map.set_index("region")["region_total"].to_dict()
 
-    # Normalizuj wartości dla kolorowania (0-1)
     max_revenue = df_map["region_total"].max()
     min_revenue = df_map["region_total"].min()
 
     def get_color(revenue):
-        if pd.isna(revenue) or max_revenue == min_revenue:
-            return "#cccccc"
+        # POPRAWKA: obsługa None i pustych wartości
+        if revenue is None or pd.isna(revenue):
+            return "#e0e0e0"  # szary dla brakujących danych
+        if max_revenue == min_revenue:
+            return "#42a5f5"  # jednolity niebieski
         norm = (revenue - min_revenue) / (max_revenue - min_revenue)
-        # Gradient od jasnego do ciemnego niebieskiego
         blue_intensity = int(255 * (1 - norm * 0.7))
-        return f"#00{blue_intensity:02x}ff"
+        return f"#{blue_intensity:02x}{blue_intensity:02x}ff"
 
-    # Utwórz mapę Folium
     m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="OpenStreetMap")
 
-    # Dodaj choropleth
     folium.GeoJson(
         geojson,
         name="województwa",
         style_function=lambda feature: {
-            "fillColor": get_color(region_revenue_dict.get(feature["properties"]["nazwa"], None)),
+            "fillColor": get_color(region_revenue_dict.get(feature.get("properties", {}).get("nazwa"), None)),
             "color": "black",
             "weight": 1,
             "fillOpacity": 0.7,
@@ -995,24 +991,11 @@ def render_poland_map(week_start: date):
         )
     ).add_to(m)
 
-    # Dodaj dodatkowe informacje jako markery (opcjonalnie)
-    for _, row in df_map.iterrows():
-        # Tu możesz dodać popup z TOP produktami
-        popup_html = f"""
-        <b>{row['region']}</b><br>
-        Sprzedaż: {row['region_total']:,.0f} zł<br>
-        <br>
-        <b>TOP 5 produktów:</b><br>
-        {row['hover_info']}
-        """
-        # Znajdź centrum województwa (to wymaga dodatkowej logiki lub danych)
-
-    # Wyświetl mapę
     st_folium(m, width=1200, height=700)
 
     # Tabela podsumowująca
     st.subheader("Podsumowanie sprzedaży po województwach")
-    summary = df_map.sort_values("region_total", ascending=False)
+    summary = df_map.sort_values("region_total", ascending=False).copy()
     summary["region_total"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
     st.dataframe(summary[["region", "region_total"]], use_container_width=True)
 # ─────────────────────────────────────────────────────────────
