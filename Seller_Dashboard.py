@@ -18,6 +18,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 st.set_page_config(page_title="Sprzedaż: WoW TOP — Rozszerzone", layout="wide")
 st.title("🛒 Sprzedaż — Trendy i TOP N")
 
+TZ = ZoneInfo("Europe/Warsaw")
+
 # ─────────────────────────────────────────────────────────────
 # 2) Ustawienia Metabase
 # ─────────────────────────────────────────────────────────────
@@ -25,7 +27,6 @@ METABASE_URL = "https://metabase.emamas.ideaerp.pl"
 METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))
 METABASE_USER = st.secrets["metabase_user"]
 METABASE_PASSWORD = st.secrets["metabase_password"]
-TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
 # 3) SQL — snapshoty WoW (po jednym na platformę)
@@ -235,6 +236,90 @@ ORDER BY c.curr_rev DESC
 """
 
 # ─────────────────────────────────────────────────────────────
+# 3a) SQL — liczniki zamówień do AOV (po jednym na platformę)
+# ─────────────────────────────────────────────────────────────
+SQL_ORDERS_ALLEGRO_PLN = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+orders_raw AS (
+  SELECT DISTINCT
+    s.id AS order_id,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date)) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s      ON s.id = l.order_id
+  JOIN res_currency cur  ON cur.id = l.currency_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'PLN'
+    AND s.name ILIKE '%Allegro%'
+)
+SELECT
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.week_end)  AS orders_curr,
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
+FROM orders_raw, params p;
+"""
+
+SQL_ORDERS_EBAY_EUR = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+orders_raw AS (
+  SELECT DISTINCT
+    s.id AS order_id,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date)) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s      ON s.id = l.order_id
+  JOIN res_currency cur  ON cur.id = l.currency_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%eBay%'
+)
+SELECT
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.week_end)  AS orders_curr,
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
+FROM orders_raw, params p;
+"""
+
+SQL_ORDERS_KAUFLAND_EUR = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+orders_raw AS (
+  SELECT DISTINCT
+    s.id AS order_id,
+    (COALESCE(s.confirm_date, s.date_order, s.create_date)) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s      ON s.id = l.order_id
+  JOIN res_currency cur  ON cur.id = l.currency_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%Kaufland%'
+)
+SELECT
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.week_end)  AS orders_curr,
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
+FROM orders_raw, params p;
+"""
+
+# ─────────────────────────────────────────────────────────────
 # 4) Metabase session (cache)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=50 * 60)
@@ -330,14 +415,13 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
     return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
-# 7) Zapytania: snapshot WoW + trend (wiele tygodni)
+# 7) Zapytania pomocnicze
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
 def query_snapshot(sql_text: str, week_start_iso: str) -> pd.DataFrame:
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
-
     res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
     if res["status"] == 401:
         get_metabase_session.clear()
@@ -346,19 +430,39 @@ def query_snapshot(sql_text: str, week_start_iso: str) -> pd.DataFrame:
             st.error("❌ Nie udało się odświeżyć sesji Metabase.")
             return pd.DataFrame()
         res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
-
     st.session_state["mb_last_status"] = res["status"]
     st.session_state["mb_last_json"] = res["json"]
-
     if res["status"] not in (200, 202) or not res["json"]:
         st.error(f"❌ Metabase HTTP {res['status']}: {str(res.get('text',''))[:300]}")
         return pd.DataFrame()
-
     df = _metabase_json_to_df(res["json"])
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
     for col in ["curr_rev", "prev_rev", "rev_change_pct", "curr_qty", "prev_qty", "qty_change_pct"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+@st.cache_data(ttl=600)
+def query_order_counts(sql_text: str, week_start_iso: str) -> pd.DataFrame:
+    """Zwraca 1-wierszowy DF z kolumnami: orders_curr, orders_prev."""
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+    res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+    if res["status"] == 401:
+        get_metabase_session.clear()
+        session = get_metabase_session()
+        if not session:
+            st.error("❌ Nie udało się odświeżyć sesji Metabase.")
+            return pd.DataFrame()
+        res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+    if res["status"] not in (200, 202) or not res["json"]:
+        return pd.DataFrame()
+    df = _metabase_json_to_df(res["json"])
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    for col in ["orders_curr", "orders_prev"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     return df
 
 @st.cache_data(ttl=600)
@@ -401,7 +505,7 @@ debug_api = st.sidebar.checkbox("Debug API", value=False)
 st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 9) Wspólne pomocnicze (kolory/statusy, eksporty)
+# 9) Wspólne pomocnicze
 # ─────────────────────────────────────────────────────────────
 def classify_change_symbol(pct: float | np.floating | None, threshold: float):
     if pd.isna(pct): return ("—","#9e9e9e")
@@ -464,21 +568,21 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     return buf.read()
 
 # ─────────────────────────────────────────────────────────────
-# 10) Renderer pojedynczej platformy (z bogatym hoverem w trendzie)
+# 10) Renderer platformy (z AOV i bogatym hoverem)
 # ─────────────────────────────────────────────────────────────
-def render_platform(platform_key: str, platform_title: str, sql_query: str, currency_label: str, currency_symbol: str):
+def render_platform(platform_key: str,
+                    platform_title: str,
+                    sql_query: str,
+                    sql_orders: str,
+                    currency_label: str,
+                    currency_symbol: str):
+
     st.header(platform_title)
 
-    # Snapshot
+    # Snapshot SKU
     df = query_snapshot(sql_query, week_start.isoformat())
-
-    if debug_api:
-        st.write(f"Metabase HTTP: {st.session_state.get('mb_last_status')}")
-        st.subheader("Raw JSON (Metabase)")
-        st.json(st.session_state.get("mb_last_json"))
-
     if df.empty:
-        st.warning(f"Brak danych dla wybranego tygodnia ({currency_label}). Zmień tydzień lub sprawdź źródło.")
+        st.warning(f"Brak danych dla wybranego tygodnia ({currency_label}).")
         return
 
     need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct","qty_change_pct"}
@@ -490,17 +594,25 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
 
     # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
-
-    # statusy/kolory
     df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
     df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
 
-    # KPI
+    # KPI sumy
     sum_curr = float(df["curr_rev"].sum() or 0)
     sum_prev = float(df["prev_rev"].sum() or 0)
     delta_abs = sum_curr - sum_prev
     delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
 
+    # AOV (średnia wartość koszyka)
+    df_ord = query_order_counts(sql_orders, week_start.isoformat())
+    orders_curr = int(df_ord["orders_curr"].iloc[0]) if not df_ord.empty and "orders_curr" in df_ord.columns else 0
+    orders_prev = int(df_ord["orders_prev"].iloc[0]) if not df_ord.empty and "orders_prev" in df_ord.columns else 0
+
+    aov_curr = (sum_curr / orders_curr) if orders_curr else np.nan
+    aov_prev = (sum_prev / orders_prev) if orders_prev else np.nan
+    aov_delta = (aov_curr - aov_prev) if (pd.notna(aov_curr) and pd.notna(aov_prev)) else np.nan
+
+    # Sticky KPI
     st.markdown("""
         <style>
         .sticky-kpi {
@@ -515,15 +627,19 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.0f} {currency_symbol}".replace(",", " "))
     c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.0f} {currency_symbol}".replace(",", " "))
     c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
+    if pd.notna(aov_curr):
+        delta_str = (f"{aov_delta:+,.0f} {currency_symbol}".replace(",", " ")) if pd.notna(aov_delta) else "—"
+        c4.metric("Średnia wartość koszyka", f"{aov_curr:,.0f} {currency_symbol}".replace(",", " "), delta=delta_str)
+    else:
+        c4.metric("Średnia wartość koszyka", "—", delta="—")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Wykres TOP N
+    # TOP N — wykres
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
-
     colors = df_top["color_rev"].tolist()
     hover = df_top.apply(
         lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
@@ -565,11 +681,10 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
     fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency_label})", showlegend=False, height=420)
     st.plotly_chart(fig_wf, width="stretch")
 
-    # Trend tygodniowy — z ładnym hoverem
+    # Trend tygodniowy — bogaty hover
     st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
 
     df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back)
-
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
     else:
@@ -587,22 +702,18 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
         chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=1, horizontal=True)
 
         if pick_skus:
-            # agregacja tydzień × SKU: przyjmujemy brakujące tygodnie = 0
             df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
             df_plot = df_plot.groupby(["week_start", "sku"], as_index=False)[["curr_rev", "curr_qty"]].sum()
 
-            # pełna oś tygodniowa (poniedziałki)
             full_weeks = pd.date_range(
                 start=df_plot["week_start"].min().normalize(),
                 end=df_plot["week_start"].max().normalize(),
                 freq="W-MON"
             )
 
-            # Pivoty: przychód i ilość
             pv_rev = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").reindex(full_weeks).fillna(0.0)
             pv_qty = df_plot.pivot(index="week_start", columns="sku", values="curr_qty").reindex(full_weeks).fillna(0.0)
 
-            # etykiety końca tygodnia do hovera (pon → niedz)
             week_end_labels = (pv_rev.index + pd.Timedelta(days=6)).strftime("%Y-%m-%d").values
 
             fig_tr = go.Figure()
@@ -613,16 +724,14 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
                 wow_abs = y - prev
                 wow_pct = np.where((prev > 0) & np.isfinite(prev), (y - prev) / prev * 100.0, np.nan)
 
-                #customdata: [qty, wow_abs, wow_pct, week_end_label]
                 custom = np.column_stack([q, wow_abs, wow_pct, week_end_labels])
-
                 hovertemplate = (
-                        "<b>%{fullData.name}</b><br>"
-                        "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
-                        "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
-                                                                   "Ilość: %{customdata[0]:,.0f} szt.<br>"
-                                                                   "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
-                                                                                                                      "<extra></extra>"
+                    "<b>%{fullData.name}</b><br>"
+                    "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
+                    "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
+                    "Ilość: %{customdata[0]:,.0f} szt.<br>"
+                    "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
+                    "<extra></extra>"
                 )
 
                 if chart_type == "area":
@@ -671,31 +780,28 @@ def render_platform(platform_key: str, platform_title: str, sql_query: str, curr
 
     # Eksport
     st.subheader("📥 Eksport danych")
-    download_col1, download_col2, download_col3 = st.columns(3)
-
+    d1, d2, d3 = st.columns(3)
     csv_bytes = df.to_csv(index=False).encode("utf-8")
-    download_col1.download_button(f"📥 Pobierz (CSV) — {platform_key}", csv_bytes, f"sprzedaz_{platform_key}.csv", "text/csv")
-
+    d1.download_button(f"📥 Pobierz (CSV) — {platform_key}", csv_bytes, f"sprzedaz_{platform_key}.csv", "text/csv")
     excel_bytes = to_excel_bytes(df)
-    download_col2.download_button(f"📥 Pobierz (Excel) — {platform_key}", excel_bytes, f"sprzedaz_{platform_key}.xlsx",
-                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
+    d2.download_button(f"📥 Pobierz (Excel) — {platform_key}", excel_bytes, f"sprzedaz_{platform_key}.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     pdf_bytes = df_to_pdf_bytes(to_display(df_top, currency_label), title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
-    download_col3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
-                                  f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
+    d3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
+                       f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
 
     # QA / Debug
     with st.expander(f"🔧 Panel QA / Debug — {platform_key}"):
         st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))
         st.write("Liczba wierszy (snapshot):", len(df))
         st.write("Liczba SKU w snapshot:", df["sku"].nunique())
-        st.write("SKU bez nazwy:", df[df["product_name"].isna()]["sku"].unique().tolist())
+        st.write("Zamówienia (tydzień / poprzedni):", orders_curr, orders_prev)
         if debug_api:
             st.subheader("Raw JSON (Metabase)")
             st.json(st.session_state.get("mb_last_json"))
 
 # ─────────────────────────────────────────────────────────────
-# 11) Zakładki: Allegro (PLN), eBay (EUR), Kaufland (EUR)
+# 11) Zakładki
 # ─────────────────────────────────────────────────────────────
 tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)"])
 
@@ -704,6 +810,7 @@ with tabs[0]:
         platform_key="allegro",
         platform_title="🇵🇱 Allegro.pl — Analiza sprzedaży (PLN)",
         sql_query=SQL_WOW_ALLEGRO_PLN,
+        sql_orders=SQL_ORDERS_ALLEGRO_PLN,
         currency_label="PLN",
         currency_symbol="zł",
     )
@@ -713,6 +820,7 @@ with tabs[1]:
         platform_key="ebay",
         platform_title="🇩🇪 eBay.de — Analiza sprzedaży (EUR)",
         sql_query=SQL_WOW_EBAY_EUR,
+        sql_orders=SQL_ORDERS_EBAY_EUR,
         currency_label="EUR",
         currency_symbol="€",
     )
@@ -722,6 +830,7 @@ with tabs[2]:
         platform_key="kaufland",
         platform_title="🇩🇪 Kaufland.de — Analiza sprzedaży (EUR)",
         sql_query=SQL_WOW_KAUFLAND_EUR,
+        sql_orders=SQL_ORDERS_KAUFLAND_EUR,
         currency_label="EUR",
         currency_symbol="€",
     )
