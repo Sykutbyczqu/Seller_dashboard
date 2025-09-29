@@ -928,21 +928,30 @@ def render_poland_map(week_start: date):
         st.warning("Po mapowaniu ZIP → województwo brak danych.")
         return
 
-    grouped = df.groupby(["region", "sku"], as_index=False).agg({"revenue": "sum"})
+    # Debug: pokaż unikalne regiony
+    st.info(f"Znalezione województwa w danych: {sorted(df['region'].unique())}")
+
+    grouped = df.groupby(["region", "sku", "product_name"], as_index=False).agg({"revenue": "sum"})
     region_totals = grouped.groupby("region", as_index=False)["revenue"].sum().rename(
         columns={"revenue": "region_total"})
     grouped = grouped.merge(region_totals, on="region", how="left")
     grouped["share_pct"] = grouped["revenue"] / grouped["region_total"] * 100
 
+    # KPI
+    st.metric("Łączna sprzedaż (wszystkie regiony)", f"{region_totals['region_total'].sum():,.0f} zł".replace(",", " "))
+
+    # Przygotuj tooltips
     hover_text = {}
     for region, sub in grouped.groupby("region"):
         sub_sorted = sub.sort_values("revenue", ascending=False).reset_index(drop=True)
         top5 = sub_sorted.head(5)
-        lines = [f"{row['sku']}: {row['share_pct']:.1f}%" for _, row in top5.iterrows()]
+        total = sub_sorted["revenue"].sum()
+        lines = [f"<b>{region}</b><br>Łącznie: {total:,.0f} zł<br><br>TOP 5:"]
+        lines += [f"{i + 1}. {row['sku']}: {row['revenue']:,.0f} zł ({row['share_pct']:.1f}%)"
+                  for i, (_, row) in enumerate(top5.iterrows())]
         hover_text[region] = "<br>".join(lines)
 
     df_map = region_totals.copy()
-    df_map["hover_info"] = df_map["region"].map(hover_text)
 
     import os
     geojson_path = os.path.join(os.path.dirname(__file__), "polska-wojewodztwa.geojson")
@@ -964,40 +973,110 @@ def render_poland_map(week_start: date):
     min_revenue = df_map["region_total"].min()
 
     def get_color(revenue):
-        # POPRAWKA: obsługa None i pustych wartości
         if revenue is None or pd.isna(revenue):
-            return "#e0e0e0"  # szary dla brakujących danych
+            return "#e0e0e0"
         if max_revenue == min_revenue:
-            return "#42a5f5"  # jednolity niebieski
+            return "#42a5f5"
         norm = (revenue - min_revenue) / (max_revenue - min_revenue)
-        blue_intensity = int(255 * (1 - norm * 0.7))
-        return f"#{blue_intensity:02x}{blue_intensity:02x}ff"
+        r = int(255 * (1 - norm))
+        g = int(200 * (1 - norm))
+        b = 255
+        return f"#{r:02x}{g:02x}{b:02x}"
 
-    m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="OpenStreetMap")
+    m = folium.Map(location=[52.0, 19.0], zoom_start=6, tiles="CartoDB positron")
 
-    folium.GeoJson(
-        geojson,
-        name="województwa",
-        style_function=lambda feature: {
-            "fillColor": get_color(region_revenue_dict.get(feature.get("properties", {}).get("name"), None)),
-            "color": "black",
-            "weight": 1,
-            "fillOpacity": 0.7,
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=["name"],
-            aliases=["Województwo:"],
-            localize=True
+    # Dodaj GeoJSON z popupami
+    for feature in geojson.get("features", []):
+        region_name = feature.get("properties", {}).get("name")
+        revenue = region_revenue_dict.get(region_name, 0)
+
+        popup_content = hover_text.get(region_name, f"<b>{region_name}</b><br>Brak danych")
+
+        folium.GeoJson(
+            feature,
+            style_function=lambda x, rev=revenue: {
+                "fillColor": get_color(rev),
+                "color": "black",
+                "weight": 1.5,
+                "fillOpacity": 0.7 if rev > 0 else 0.3,
+            },
+            popup=folium.Popup(popup_content, max_width=300),
+            tooltip=f"{region_name}: {revenue:,.0f} zł" if revenue > 0 else f"{region_name}: brak danych"
+        ).add_to(m)
+
+    st_folium(m, width=1200, height=600)
+
+    # SEKCJA INTERAKTYWNA - wybór województwa
+    st.subheader("📊 Szczegóły sprzedaży według województw")
+
+    # Wykres słupkowy wszystkich regionów
+    region_totals_sorted = region_totals.sort_values("region_total", ascending=False)
+
+    fig_bar = go.Figure(go.Bar(
+        x=region_totals_sorted["region_total"],
+        y=region_totals_sorted["region"],
+        orientation="h",
+        marker=dict(color=region_totals_sorted["region_total"], colorscale="Blues"),
+        text=region_totals_sorted["region_total"].apply(lambda x: f"{x:,.0f} zł"),
+        textposition="outside"
+    ))
+    fig_bar.update_layout(
+        xaxis_title="Przychód (zł)",
+        yaxis_title="Województwo",
+        height=400,
+        yaxis={"categoryorder": "total ascending"}
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # Wybór województwa do szczegółów
+    st.markdown("---")
+    selected_region = st.selectbox(
+        "🔍 Wybierz województwo, aby zobaczyć TOP produkty",
+        options=sorted(region_totals["region"].tolist()),
+        index=0
+    )
+
+    if selected_region:
+        region_data = grouped[grouped["region"] == selected_region].copy()
+        region_data = region_data.sort_values("revenue", ascending=False)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(
+                f"Sprzedaż w {selected_region}",
+                f"{region_data['revenue'].sum():,.0f} zł".replace(",", " ")
+            )
+        with col2:
+            st.metric(
+                "Liczba różnych produktów",
+                f"{region_data['sku'].nunique()}"
+            )
+
+        # TOP 10 produktów
+        st.markdown(f"#### TOP 10 produktów w {selected_region}")
+        top_products = region_data.head(10).copy()
+        top_products["revenue_formatted"] = top_products["revenue"].apply(lambda x: f"{x:,.0f} zł")
+
+        display_df = top_products[["sku", "product_name", "revenue_formatted", "share_pct"]].rename(columns={
+            "sku": "SKU",
+            "product_name": "Nazwa produktu",
+            "revenue_formatted": "Przychód",
+            "share_pct": "Udział %"
+        })
+        display_df["Udział %"] = display_df["Udział %"].round(2)
+
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # Tabela wszystkich regionów
+    with st.expander("📋 Pełna tabela - wszystkie województwa"):
+        summary = region_totals.sort_values("region_total", ascending=False).copy()
+        summary["revenue_formatted"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
+        st.dataframe(
+            summary[["region", "revenue_formatted"]].rename(
+                columns={"region": "Województwo", "revenue_formatted": "Przychód"}),
+            use_container_width=True,
+            hide_index=True
         )
-    ).add_to(m)
-
-    st_folium(m, width=1200, height=700)
-
-    # Tabela podsumowująca
-    st.subheader("Podsumowanie sprzedaży po województwach")
-    summary = df_map.sort_values("region_total", ascending=False).copy()
-    summary["region_total"] = summary["region_total"].apply(lambda x: f"{x:,.0f} zł")
-    st.dataframe(summary[["region", "region_total"]], use_container_width=True)
 # ─────────────────────────────────────────────────────────────
 # 11) Zakładki
 # ─────────────────────────────────────────────────────────────
