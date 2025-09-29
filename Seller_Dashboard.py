@@ -15,11 +15,11 @@ from matplotlib.backends.backend_pdf import PdfPages
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Sprzedaż: WoW TOP (PLN) — Rozszerzone", layout="wide")
-st.title("🛒 Sprzedaż — Trendy i TOP N (PLN)")
+st.set_page_config(page_title="Sprzedaż: WoW TOP — Rozszerzone", layout="wide")
+st.title("🛒 Sprzedaż — Trendy i TOP N")
 
 # ─────────────────────────────────────────────────────────────
-# 2) Ustawienia Metabase (przykładowe - w runtime użyj st.secrets)
+# 2) Ustawienia Metabase
 # ─────────────────────────────────────────────────────────────
 METABASE_URL = "https://metabase.emamas.ideaerp.pl"
 METABASE_DATABASE_ID = int(st.secrets.get("metabase_database_id", 2))
@@ -28,9 +28,9 @@ METABASE_PASSWORD = st.secrets["metabase_password"]
 TZ = ZoneInfo("Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 3) SQL (ten sam co wcześniej)
+# 3) SQL — snapshoty WoW (po jednym na platformę)
 # ─────────────────────────────────────────────────────────────
-SQL_WOW_TOP10 = """
+SQL_WOW_ALLEGRO_PLN = """
 WITH params AS (
   SELECT
     {{week_start}}::date AS week_start,
@@ -45,7 +45,7 @@ lines AS (
     COALESCE(pt.name, l.name) AS product_name,
     COALESCE(l.product_uom_qty, 0) AS qty,
     COALESCE(l.price_total, l.price_subtotal,
-             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total_pln,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
     COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
   FROM sale_order_line l
   JOIN sale_order s           ON s.id = l.order_id
@@ -63,8 +63,8 @@ curr AS (
   SELECT
     l.sku,
     MAX(l.product_name) AS product_name,
-    SUM(l.line_total_pln) AS curr_rev,
-    SUM(l.qty)            AS curr_qty
+    SUM(l.line_total) AS curr_rev,
+    SUM(l.qty)        AS curr_qty
   FROM lines l CROSS JOIN w
   WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
     AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
@@ -73,8 +73,144 @@ curr AS (
 prev AS (
   SELECT
     l.sku,
-    SUM(l.line_total_pln) AS prev_rev,
-    SUM(l.qty)            AS prev_qty
+    SUM(l.line_total) AS prev_rev,
+    SUM(l.qty)        AS prev_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
+  GROUP BY l.sku
+)
+SELECT
+  c.sku,
+  c.product_name,
+  COALESCE(c.curr_rev,0) AS curr_rev,
+  COALESCE(c.curr_qty,0) AS curr_qty,
+  COALESCE(p.prev_rev,0) AS prev_rev,
+  COALESCE(p.prev_qty,0) AS prev_qty,
+  CASE WHEN COALESCE(p.prev_rev,0)=0 AND COALESCE(c.curr_rev,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_rev,0)=0 THEN 0
+       ELSE (c.curr_rev - p.prev_rev) / NULLIF(p.prev_rev,0)::numeric * 100.0 END AS rev_change_pct,
+  CASE WHEN COALESCE(p.prev_qty,0)=0 AND COALESCE(c.curr_qty,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_qty,0)=0 THEN 0
+       ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
+FROM curr c
+LEFT JOIN prev p ON p.sku = c.sku
+ORDER BY c.curr_rev DESC
+"""
+
+SQL_WOW_EBAY_EUR = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+lines AS (
+  SELECT
+    l.product_id,
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%eBay%'
+),
+w AS (
+  SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
+),
+curr AS (
+  SELECT
+    l.sku,
+    MAX(l.product_name) AS product_name,
+    SUM(l.line_total) AS curr_rev,
+    SUM(l.qty)        AS curr_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
+  GROUP BY l.sku
+),
+prev AS (
+  SELECT
+    l.sku,
+    SUM(l.line_total) AS prev_rev,
+    SUM(l.qty)        AS prev_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
+  GROUP BY l.sku
+)
+SELECT
+  c.sku,
+  c.product_name,
+  COALESCE(c.curr_rev,0) AS curr_rev,
+  COALESCE(c.curr_qty,0) AS curr_qty,
+  COALESCE(p.prev_rev,0) AS prev_rev,
+  COALESCE(p.prev_qty,0) AS prev_qty,
+  CASE WHEN COALESCE(p.prev_rev,0)=0 AND COALESCE(c.curr_rev,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_rev,0)=0 THEN 0
+       ELSE (c.curr_rev - p.prev_rev) / NULLIF(p.prev_rev,0)::numeric * 100.0 END AS rev_change_pct,
+  CASE WHEN COALESCE(p.prev_qty,0)=0 AND COALESCE(c.curr_qty,0)>0 THEN NULL
+       WHEN COALESCE(p.prev_qty,0)=0 THEN 0
+       ELSE (c.curr_qty - p.prev_qty) / NULLIF(p.prev_qty,0)::numeric * 100.0 END AS qty_change_pct
+FROM curr c
+LEFT JOIN prev p ON p.sku = c.sku
+ORDER BY c.curr_rev DESC
+"""
+
+SQL_WOW_KAUFLAND_EUR = """
+WITH params AS (
+  SELECT
+    {{week_start}}::date AS week_start,
+    ({{week_start}}::date + INTERVAL '7 day') AS week_end,
+    ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
+    {{week_start}}::date AS prev_end
+),
+lines AS (
+  SELECT
+    l.product_id,
+    COALESCE(pp.default_code, l.product_id::text) AS sku,
+    COALESCE(pt.name, l.name) AS product_name,
+    COALESCE(l.product_uom_qty, 0) AS qty,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total,
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts
+  FROM sale_order_line l
+  JOIN sale_order s           ON s.id = l.order_id
+  JOIN res_currency cur       ON cur.id = l.currency_id
+  LEFT JOIN product_product  pp ON pp.id = l.product_id
+  LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
+  WHERE s.state IN ('sale','done')
+    AND cur.name = 'EUR'
+    AND s.name ILIKE '%Kaufland%'
+),
+w AS (
+  SELECT p.week_start, p.week_end, p.prev_start, p.prev_end FROM params p
+),
+curr AS (
+  SELECT
+    l.sku,
+    MAX(l.product_name) AS product_name,
+    SUM(l.line_total) AS curr_rev,
+    SUM(l.qty)        AS curr_qty
+  FROM lines l CROSS JOIN w
+  WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.week_start
+    AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.week_end
+  GROUP BY l.sku
+),
+prev AS (
+  SELECT
+    l.sku,
+    SUM(l.line_total) AS prev_rev,
+    SUM(l.qty)        AS prev_qty
   FROM lines l CROSS JOIN w
   WHERE (l.order_ts AT TIME ZONE 'Europe/Warsaw') >= w.prev_start
     AND (l.order_ts AT TIME ZONE 'Europe/Warsaw') <  w.prev_end
@@ -194,10 +330,10 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
     return pd.DataFrame()
 
 # ─────────────────────────────────────────────────────────────
-# 7) Public query function (caching, session refresh)
+# 7) Zapytania: snapshot WoW + trend (wiele tygodni)
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600)
-def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
+def query_snapshot(sql_text: str, week_start_iso: str) -> pd.DataFrame:
     session = get_metabase_session()
     if not session:
         return pd.DataFrame()
@@ -225,8 +361,23 @@ def query_wow_top10(sql_text: str, week_start_iso: str) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
+@st.cache_data(ttl=600)
+def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8) -> pd.DataFrame:
+    frames = []
+    for i in range(weeks):
+        ws_date = week_start_date - timedelta(weeks=i)
+        df_i = query_snapshot(sql_text, ws_date.isoformat())
+        if df_i is None or df_i.empty:
+            continue
+        df_i = df_i.copy()
+        df_i["week_start"] = pd.to_datetime(ws_date)
+        frames.append(df_i)
+    if frames:
+        return pd.concat(frames, ignore_index=True)
+    return pd.DataFrame()
+
 # ─────────────────────────────────────────────────────────────
-# 8) UI: filtry, progi, trend, TOP N
+# 8) UI — wspólne filtry (działają dla wszystkich zakładek)
 # ─────────────────────────────────────────────────────────────
 def last_completed_week_start(today: date | None = None) -> date:
     d = today or datetime.now(TZ).date()
@@ -250,31 +401,7 @@ debug_api = st.sidebar.checkbox("Debug API", value=False)
 st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw")
 
 # ─────────────────────────────────────────────────────────────
-# 9) Pobranie snapshotu (główny tydzień)
-# ─────────────────────────────────────────────────────────────
-df = query_wow_top10(SQL_WOW_TOP10, week_start.isoformat())
-
-if debug_api:
-    st.write(f"Metabase HTTP: {st.session_state.get('mb_last_status')}")
-    st.subheader("Raw JSON (Metabase)")
-    st.json(st.session_state.get("mb_last_json"))
-
-if df.empty:
-    st.warning("Brak danych dla wybranego tygodnia (PLN). Zmień tydzień lub sprawdź źródło.")
-    st.stop()
-
-need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct","qty_change_pct"}
-missing = [c for c in need if c not in df.columns]
-if missing:
-    st.error(f"Brak kolumn w danych: {missing}")
-    st.dataframe(df.head(), use_container_width=True)
-    st.stop()
-
-# Ranking TOP N
-df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
-
-# ─────────────────────────────────────────────────────────────
-# 10) Pomocnicze: klasyfikacja i kolory
+# 9) Wspólne pomocnicze (kolory/statusy, eksporty)
 # ─────────────────────────────────────────────────────────────
 def classify_change_symbol(pct: float | np.floating | None, threshold: float):
     if pd.isna(pct): return ("—","#9e9e9e")
@@ -288,150 +415,11 @@ def classify_change_symbol(pct: float | np.floating | None, threshold: float):
         return ("🔴↓","#ef5350")
     return ("⚪≈","#9e9e9e")
 
-df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
-df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
-
-# ─────────────────────────────────────────────────────────────
-# 11) KPI sticky (CSS)
-# ─────────────────────────────────────────────────────────────
-sum_curr = float(df["curr_rev"].sum() or 0)
-sum_prev = float(df["prev_rev"].sum() or 0)
-delta_abs = sum_curr - sum_prev
-delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
-
-st.markdown("""
-    <style>
-    .sticky-kpi {
-      position: sticky;
-      top: 70px;
-      background-color: white;
-      padding: 8px;
-      z-index: 999;
-      border-bottom: 1px solid rgba(0,0,0,0.06);
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
-c1, c2, c3 = st.columns(3)
-c1.metric("Suma sprzedaży (PLN, tydzień)", f"{sum_curr:,.0f} zł".replace(",", " "))
-c2.metric("Zmiana vs poprzedni (PLN)", f"{delta_abs:,.0f} zł".replace(",", " "))
-c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────
-# 12) Wykres TOPN — go.Bar (unikamy potencjalnych deprecacji PX)
-# ─────────────────────────────────────────────────────────────
-st.subheader(f"TOP {top_n} — Sprzedaż tygodnia (PLN)")
-
-colors = df_top["color_rev"].tolist()
-hover = df_top.apply(lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} zł<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}", axis=1)
-fig = go.Figure(go.Bar(
-    x=df_top["curr_rev"],
-    y=df_top["sku"],
-    orientation="h",
-    marker=dict(color=colors),
-    hoverinfo="text",
-    hovertext=hover
-))
-fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150))
-st.plotly_chart(fig, use_container_width=True)
-
-# ─────────────────────────────────────────────────────────────
-# 13) Waterfall — bez deprecated kwargs w konstruktorze
-# ─────────────────────────────────────────────────────────────
-st.subheader("📊 Wkład TOP produktów w zmianę sprzedaży (waterfall)")
-df_delta = df_top.copy()
-df_delta["delta"] = df_delta["curr_rev"] - df_delta["prev_rev"]
-df_delta = df_delta.sort_values("delta", ascending=False).reset_index(drop=True)
-
-measures = ["relative"] * len(df_delta) + ["total"]
-x = df_delta["sku"].tolist() + ["SUMA"]
-y = df_delta["delta"].tolist() + [df_delta["delta"].sum()]
-
-fig_wf = go.Figure(go.Waterfall(
-    x=x,
-    y=y,
-    measure=measures,
-    text=[f"{v:,.0f}" for v in y],
-    textposition="outside"
-))
-# ustaw kolory przez update_traces (zalecane)
-fig_wf.update_traces(
-    increasing=dict(marker=dict(color="#66bb6a")),
-    decreasing=dict(marker=dict(color="#ef5350")),
-    totals=dict(marker=dict(color="#42a5f5"))
-)
-fig_wf.update_layout(title="Wkład produktów w zmianę sprzedaży (PLN)", showlegend=False)
-st.plotly_chart(fig_wf, use_container_width=True, height=420)
-
-# ─────────────────────────────────────────────────────────────
-# 14) Trend tygodniowy — pobieramy wiele snapshotów i rysujemy go.Scatter
-# ─────────────────────────────────────────────────────────────
-st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
-
-@st.cache_data(ttl=600)
-def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8) -> pd.DataFrame:
-    frames = []
-    for i in range(weeks):
-        ws_date = week_start_date - timedelta(weeks=i)
-        iso = ws_date.isoformat()
-        df_i = query_wow_top10(sql_text, iso)
-        if df_i is None or df_i.empty:
-            continue
-        df_i = df_i.copy()
-        df_i["week_start"] = pd.to_datetime(ws_date)
-        frames.append(df_i)
-    if frames:
-        all_df = pd.concat(frames, ignore_index=True)
-        return all_df
-    return pd.DataFrame()
-
-df_trend = query_trend_many_weeks(SQL_WOW_TOP10, week_start, weeks=weeks_back)
-
-if df_trend.empty:
-    st.info("Brak danych trendu (dla wybranej liczby tygodni).")
-else:
-    all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
-
-    # 🔍 pole do filtrowania SKU/nazwy
-    search_term = st.text_input("Szukaj SKU lub produktu", "")
-    if search_term:
-        filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()]
-    else:
-        filtered_skus = all_skus
-
-    pick_skus = st.multiselect(
-        "Wybierz SKU do analizy trendu",
-        options=filtered_skus,
-        default=filtered_skus[:5] if filtered_skus else []
-    )
-
-    chart_type = st.radio("Typ wykresu", ["area", "line"], index=0, horizontal=True)
-
-    if pick_skus:
-        df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
-        df_plot = df_plot.groupby(["week_start","sku"])["curr_rev"].sum().reset_index()
-        pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
-
-        fig_tr = go.Figure()
-        for sku in pv.columns:
-            y = pv[sku].values
-            if chart_type == "area":
-                fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines", name=sku, stackgroup="one"))
-            else:
-                fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines+markers", name=sku))
-        fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title="Sprzedaż (PLN)", height=520)
-        st.plotly_chart(fig_tr, use_container_width=True)
-
-# ─────────────────────────────────────────────────────────────
-# 15) Tabele wzrostów/spadków i podgląd TOP
-# ─────────────────────────────────────────────────────────────
-COLS_DISPLAY = {
+COLS_DISPLAY_BASE = {
     "sku": "SKU",
     "product_name": "Produkt",
-    "curr_rev": "Sprzedaż tygodnia (PLN)",
-    "prev_rev": "Sprzedaż poprzedniego tygodnia (PLN)",
+    "curr_rev": "Sprzedaż tygodnia ({CUR})",
+    "prev_rev": "Sprzedaż poprzedniego tygodnia ({CUR})",
     "rev_change_pct": "Zmiana sprzedaży %",
     "curr_qty": "Ilość tygodnia (szt.)",
     "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
@@ -440,48 +428,24 @@ COLS_DISPLAY = {
     "status_qty": "Status (ilość)"
 }
 
-def to_display(df_in: pd.DataFrame) -> pd.DataFrame:
-    out = df_in.rename(columns=COLS_DISPLAY)
-    keep = [c for c in ["SKU","Produkt","Sprzedaż tygodnia (PLN)","Sprzedaż poprzedniego tygodnia (PLN)","Zmiana sprzedaży %","Ilość tygodnia (szt.)","Ilość poprzedniego tygodnia (szt.)","Zmiana ilości %","Status (wartość)","Status (ilość)"] if c in out.columns]
+def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
+    cols = {k: (v.replace("{CUR}", cur)) for k, v in COLS_DISPLAY_BASE.items()}
+    out = df_in.rename(columns=cols)
+    keep = [c for c in [
+        "SKU", "Produkt",
+        f"Sprzedaż tygodnia ({cur})",
+        f"Sprzedaż poprzedniego tygodnia ({cur})",
+        "Zmiana sprzedaży %", "Ilość tygodnia (szt.)",
+        "Ilość poprzedniego tygodnia (szt.)", "Zmiana ilości %",
+        "Status (wartość)", "Status (ilość)"
+    ] if c in out.columns]
     return out[keep]
-
-ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
-downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
-
-colA, colB = st.columns(2)
-with colA:
-    st.markdown("### 🚀 Wzrosty (≥ próg)")
-    if ups.empty:
-        st.info("Brak pozycji przekraczających próg wzrostu.")
-    else:
-        st.dataframe(to_display(ups), use_container_width=True)
-with colB:
-    st.markdown("### 📉 Spadki (≤ -próg)")
-    if downs.empty:
-        st.info("Brak pozycji przekraczających próg spadku.")
-    else:
-        st.dataframe(to_display(downs), use_container_width=True)
-
-with st.expander("🔎 Podgląd TOP (tabela)"):
-    st.dataframe(to_display(df_top), use_container_width=True)
-
-# ─────────────────────────────────────────────────────────────
-# 16) Eksport: CSV / Excel / PDF
-# ─────────────────────────────────────────────────────────────
-st.subheader("📥 Eksport danych")
-download_col1, download_col2, download_col3 = st.columns(3)
-
-csv_bytes = df.to_csv(index=False).encode("utf-8")
-download_col1.download_button("📥 Pobierz (CSV)", csv_bytes, "sprzedaz.csv", "text/csv")
 
 def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         dframe.to_excel(writer, index=False, sheet_name="sprzedaz")
     return output.getvalue()
-
-excel_bytes = to_excel_bytes(df)
-download_col2.download_button("📥 Pobierz (Excel)", excel_bytes, "sprzedaz.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf = io.BytesIO()
@@ -499,17 +463,215 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf.seek(0)
     return buf.read()
 
-pdf_bytes = df_to_pdf_bytes(to_display(df_top), title=f"TOP{top_n} - raport tygodniowy")
-download_col3.download_button("📥 Pobierz (PDF) — TOP", pdf_bytes, "sprzedaz_top.pdf", "application/pdf")
+# ─────────────────────────────────────────────────────────────
+# 10) Renderer pojedynczej platformy (kod z Twojej wersji)
+# ─────────────────────────────────────────────────────────────
+def render_platform(platform_key: str, platform_title: str, sql_query: str, currency_label: str, currency_symbol: str):
+    st.header(platform_title)
 
-# ─────────────────────────────────────────────────────────────
-# 17) Panel QA / Debug
-# ─────────────────────────────────────────────────────────────
-with st.expander("🔧 Panel QA / Debug"):
-    st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))
-    st.write("Liczba wierszy (snapshot):", len(df))
-    st.write("Liczba SKU w snapshot:", df["sku"].nunique())
-    st.write("SKU bez nazwy:", df[df["product_name"].isna()]["sku"].unique().tolist())
+    # Snapshot
+    df = query_snapshot(sql_query, week_start.isoformat())
+
     if debug_api:
+        st.write(f"Metabase HTTP: {st.session_state.get('mb_last_status')}")
         st.subheader("Raw JSON (Metabase)")
         st.json(st.session_state.get("mb_last_json"))
+
+    if df.empty:
+        st.warning(f"Brak danych dla wybranego tygodnia ({currency_label}). Zmień tydzień lub sprawdź źródło.")
+        return
+
+    need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct","qty_change_pct"}
+    missing = [c for c in need if c not in df.columns]
+    if missing:
+        st.error(f"Brak kolumn w danych: {missing}")
+        st.dataframe(df.head(), width="stretch")
+        return
+
+    # TOP N
+    df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
+
+    # statusy/kolory
+    df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
+    df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
+
+    # KPI
+    sum_curr = float(df["curr_rev"].sum() or 0)
+    sum_prev = float(df["prev_rev"].sum() or 0)
+    delta_abs = sum_curr - sum_prev
+    delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0.0
+
+    st.markdown("""
+        <style>
+        .sticky-kpi {
+          position: sticky;
+          top: 70px;
+          background-color: white;
+          padding: 8px;
+          z-index: 999;
+          border-bottom: 1px solid rgba(0,0,0,0.06);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.0f} {currency_symbol}".replace(",", " "))
+    c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.0f} {currency_symbol}".replace(",", " "))
+    c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Wykres TOP N
+    st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
+
+    colors = df_top["color_rev"].tolist()
+    hover = df_top.apply(lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}", axis=1)
+    fig = go.Figure(go.Bar(
+        x=df_top["curr_rev"],
+        y=df_top["sku"],
+        orientation="h",
+        marker=dict(color=colors),
+        hoverinfo="text",
+        hovertext=hover
+    ))
+    fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=520, margin=dict(l=150))
+    st.plotly_chart(fig, width="stretch")
+
+    # Waterfall
+    st.subheader("📊 Wkład TOP produktów w zmianę sprzedaży (waterfall)")
+    df_delta = df_top.copy()
+    df_delta["delta"] = df_delta["curr_rev"] - df_delta["prev_rev"]
+    df_delta = df_delta.sort_values("delta", ascending=False).reset_index(drop=True)
+
+    measures = ["relative"] * len(df_delta) + ["total"]
+    x = df_delta["sku"].tolist() + ["SUMA"]
+    y = df_delta["delta"].tolist() + [df_delta["delta"].sum()]
+
+    fig_wf = go.Figure(go.Waterfall(
+        x=x,
+        y=y,
+        measure=measures,
+        text=[f"{v:,.0f}" for v in y],
+        textposition="outside"
+    ))
+    fig_wf.update_traces(
+        increasing=dict(marker=dict(color="#66bb6a")),
+        decreasing=dict(marker=dict(color="#ef5350")),
+        totals=dict(marker=dict(color="#42a5f5"))
+    )
+    fig_wf.update_layout(title=f"Wkład produktów w zmianę sprzedaży ({currency_label})", showlegend=False, height=420)
+    st.plotly_chart(fig_wf, width="stretch")
+
+    # Trend tygodniowy — w oparciu o wiele snapshotów
+    st.subheader("📈 Trendy tygodniowe — wybierz SKU do analizy trendu")
+
+    df_trend = query_trend_many_weeks(sql_query, week_start, weeks=weeks_back)
+
+    if df_trend.empty:
+        st.info("Brak danych trendu (dla wybranej liczby tygodni).")
+    else:
+        all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
+
+        search_term = st.text_input(f"Szukaj SKU lub produktu — {platform_key}", "")
+        filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()] if search_term else all_skus
+
+        pick_skus = st.multiselect(
+            f"Wybierz SKU do analizy trendu — {platform_key}",
+            options=filtered_skus,
+            default=filtered_skus[:5] if filtered_skus else []
+        )
+
+        chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=0, horizontal=True)
+
+        if pick_skus:
+            df_plot = df_trend[df_trend["sku"].isin(pick_skus)].copy()
+            df_plot = df_plot.groupby(["week_start","sku"])["curr_rev"].sum().reset_index()
+            pv = df_plot.pivot(index="week_start", columns="sku", values="curr_rev").fillna(0).sort_index()
+
+            fig_tr = go.Figure()
+            for sku in pv.columns:
+                y = pv[sku].values
+                if chart_type == "area":
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines", name=sku, stackgroup="one"))
+                else:
+                    fig_tr.add_trace(go.Scatter(x=pv.index, y=y, mode="lines+markers", name=sku))
+            fig_tr.update_layout(xaxis=dict(tickformat="%Y-%m-%d"), yaxis_title=f"Sprzedaż ({currency_label})", height=520)
+            st.plotly_chart(fig_tr, width="stretch")
+
+    # Tabele
+    ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
+    downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("### 🚀 Wzrosty (≥ próg)")
+        if ups.empty:
+            st.info("Brak pozycji przekraczających próg wzrostu.")
+        else:
+            st.dataframe(to_display(ups, currency_label), width="stretch")
+    with colB:
+        st.markdown("### 📉 Spadki (≤ -próg)")
+        if downs.empty:
+            st.info("Brak pozycji przekraczających próg spadku.")
+        else:
+            st.dataframe(to_display(downs, currency_label), width="stretch")
+
+    with st.expander("🔎 Podgląd TOP (tabela)"):
+        st.dataframe(to_display(df_top, currency_label), width="stretch")
+
+    # Eksport
+    st.subheader("📥 Eksport danych")
+    download_col1, download_col2, download_col3 = st.columns(3)
+
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    download_col1.download_button(f"📥 Pobierz (CSV) — {platform_key}", csv_bytes, f"sprzedaz_{platform_key}.csv", "text/csv")
+
+    excel_bytes = to_excel_bytes(df)
+    download_col2.download_button(f"📥 Pobierz (Excel) — {platform_key}", excel_bytes, f"sprzedaz_{platform_key}.xlsx",
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    pdf_bytes = df_to_pdf_bytes(to_display(df_top, currency_label), title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
+    download_col3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
+                                  f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
+
+    # QA / Debug
+    with st.expander(f"🔧 Panel QA / Debug — {platform_key}"):
+        st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))
+        st.write("Liczba wierszy (snapshot):", len(df))
+        st.write("Liczba SKU w snapshot:", df["sku"].nunique())
+        st.write("SKU bez nazwy:", df[df["product_name"].isna()]["sku"].unique().tolist())
+        if debug_api:
+            st.subheader("Raw JSON (Metabase)")
+            st.json(st.session_state.get("mb_last_json"))
+
+# ─────────────────────────────────────────────────────────────
+# 11) Zakładki: Allegro (PLN), eBay (EUR), Kaufland (EUR)
+# ─────────────────────────────────────────────────────────────
+tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)"])
+
+with tabs[0]:
+    render_platform(
+        platform_key="allegro",
+        platform_title="🇵🇱 Allegro.pl — Analiza sprzedaży (PLN)",
+        sql_query=SQL_WOW_ALLEGRO_PLN,
+        currency_label="PLN",
+        currency_symbol="zł",
+    )
+
+with tabs[1]:
+    render_platform(
+        platform_key="ebay",
+        platform_title="🇩🇪 eBay.de — Analiza sprzedaży (EUR)",
+        sql_query=SQL_WOW_EBAY_EUR,
+        currency_label="EUR",
+        currency_symbol="€",
+    )
+
+with tabs[2]:
+    render_platform(
+        platform_key="kaufland",
+        platform_title="🇩🇪 Kaufland.de — Analiza sprzedaży (EUR)",
+        sql_query=SQL_WOW_KAUFLAND_EUR,
+        currency_label="EUR",
+        currency_symbol="€",
+    )
