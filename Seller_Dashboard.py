@@ -15,6 +15,16 @@ import requests
 import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.graphics.shapes import Drawing
+from reportlab.graphics.charts.barcharts import VerticalBarChart
+from reportlab.graphics.charts.linecharts import HorizontalLineChart
+import tempfile
 
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
@@ -462,6 +472,265 @@ def get_metabase_session() -> str | None:
         st.error(f"❌ Błąd logowania do Metabase: {e}")
         return None
 
+# Generowanie PDF
+def generate_executive_pdf_report(
+        platform_key: str,
+        platform_title: str,
+        df: pd.DataFrame,
+        df_top: pd.DataFrame,
+        sum_curr: float,
+        sum_prev: float,
+        orders_curr: int,
+        orders_prev: int,
+        aov_curr: float,
+        aov_prev: float,
+        currency_label: str,
+        currency_symbol: str,
+        week_start: date,
+        week_end: date
+) -> bytes:
+    """
+    Generuje profesjonalny raport PDF z metrykami, tabelami i wykresami.
+    """
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=2 * cm,
+        leftMargin=2 * cm,
+        topMargin=2 * cm,
+        bottomMargin=2 * cm
+    )
+
+    # Style
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=24,
+        textColor=colors.HexColor('#1a237e'),
+        spaceAfter=30,
+        alignment=TA_CENTER
+    )
+
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=16,
+        textColor=colors.HexColor('#283593'),
+        spaceAfter=12,
+        spaceBefore=12
+    )
+
+    normal_style = styles['Normal']
+
+    # Elementy raportu
+    story = []
+
+    # === STRONA TYTUŁOWA ===
+    story.append(Spacer(1, 3 * cm))
+    story.append(Paragraph(f"Raport Sprzedaży", title_style))
+    story.append(Paragraph(f"{platform_title}", heading_style))
+    story.append(Spacer(1, 1 * cm))
+
+    period_text = f"<b>Okres:</b> {week_start.strftime('%d.%m.%Y')} - {week_end.strftime('%d.%m.%Y')}"
+    story.append(Paragraph(period_text, normal_style))
+
+    generated_text = f"<b>Wygenerowano:</b> {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}"
+    story.append(Paragraph(generated_text, normal_style))
+
+    story.append(PageBreak())
+
+    # === EXECUTIVE SUMMARY ===
+    story.append(Paragraph("Executive Summary", heading_style))
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Tabela z kluczowymi metrykami
+    delta_abs = sum_curr - sum_prev
+    delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0
+    aov_delta = aov_curr - aov_prev if (pd.notna(aov_curr) and pd.notna(aov_prev)) else 0
+
+    kpi_data = [
+        ['Metryka', 'Wartość', 'Zmiana', 'Zmiana %'],
+        [
+            'Sprzedaż',
+            f'{sum_curr:,.2f} {currency_symbol}',
+            f'{delta_abs:+,.2f} {currency_symbol}',
+            f'{delta_pct:+.1f}%'
+        ],
+        [
+            'Liczba zamówień',
+            f'{orders_curr:,}',
+            f'{orders_curr - orders_prev:+,}',
+            f'{((orders_curr - orders_prev) / orders_prev * 100):+.1f}%' if orders_prev else 'N/A'
+        ],
+        [
+            'AOV (śr. wartość koszyka)',
+            f'{aov_curr:,.2f} {currency_symbol}' if pd.notna(aov_curr) else 'N/A',
+            f'{aov_delta:+,.2f} {currency_symbol}' if pd.notna(aov_delta) else 'N/A',
+            f'{(aov_delta / aov_prev * 100):+.1f}%' if (pd.notna(aov_prev) and aov_prev > 0) else 'N/A'
+        ],
+    ]
+
+    kpi_table = Table(kpi_data, colWidths=[5 * cm, 4 * cm, 4 * cm, 3 * cm])
+    kpi_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3f51b5')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 12),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 10),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+    ]))
+
+    story.append(kpi_table)
+    story.append(Spacer(1, 1 * cm))
+
+    # === TOP 10 PRODUKTÓW ===
+    story.append(Paragraph(f"TOP 10 Produktów wg Sprzedaży", heading_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    top10_data = [['#', 'SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
+    for idx, (_, row) in enumerate(df_top.head(10).iterrows(), 1):
+        top10_data.append([
+            str(idx),
+            str(row['sku'])[:20],
+            str(row['product_name'])[:40] + ('...' if len(str(row['product_name'])) > 40 else ''),
+            f"{row['curr_rev']:,.2f}",
+            f"{row['rev_change_pct']:+.1f}%" if pd.notna(row['rev_change_pct']) else 'NEW'
+        ])
+
+    top10_table = Table(top10_data, colWidths=[1 * cm, 3 * cm, 7 * cm, 3 * cm, 2.5 * cm])
+    top10_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#5c6bc0')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+        ('ALIGN', (-2, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+        ('FONTSIZE', (0, 1), (-1, -1), 9),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+    ]))
+
+    story.append(top10_table)
+    story.append(PageBreak())
+
+    # === WYKRES SŁUPKOWY TOP 10 ===
+    story.append(Paragraph("Wizualizacja: TOP 10 Produktów", heading_style))
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Stwórz wykres słupkowy
+    drawing = Drawing(400, 250)
+    bc = VerticalBarChart()
+    bc.x = 50
+    bc.y = 50
+    bc.height = 180
+    bc.width = 300
+
+    top10_values = df_top.head(10)['curr_rev'].tolist()
+    top10_labels = [str(sku)[:15] for sku in df_top.head(10)['sku'].tolist()]
+
+    bc.data = [top10_values]
+    bc.categoryAxis.categoryNames = top10_labels
+    bc.categoryAxis.labels.angle = 45
+    bc.categoryAxis.labels.fontSize = 7
+    bc.valueAxis.valueMin = 0
+    bc.bars[0].fillColor = colors.HexColor('#42a5f5')
+
+    drawing.add(bc)
+    story.append(drawing)
+    story.append(Spacer(1, 1 * cm))
+
+    # === ANALIZA WZROSTÓW I SPADKÓW ===
+    story.append(PageBreak())
+    story.append(Paragraph("Analiza Zmian", heading_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    threshold = 20  # możesz parametryzować
+    ups = df[df['rev_change_pct'] >= threshold].sort_values('curr_rev', ascending=False).head(5)
+    downs = df[df['rev_change_pct'] <= -threshold].sort_values('curr_rev', ascending=False).head(5)
+
+    # Wzrosty
+    story.append(Paragraph("🚀 TOP 5 Wzrostów (≥20%)", ParagraphStyle('SubHeading', parent=heading_style, fontSize=12)))
+
+    if not ups.empty:
+        ups_data = [['SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
+        for _, row in ups.iterrows():
+            ups_data.append([
+                str(row['sku'])[:15],
+                str(row['product_name'])[:50],
+                f"{row['curr_rev']:,.2f}",
+                f"{row['rev_change_pct']:+.1f}%"
+            ])
+
+        ups_table = Table(ups_data, colWidths=[3 * cm, 8 * cm, 3 * cm, 2.5 * cm])
+        ups_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#66bb6a')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgreen]),
+        ]))
+        story.append(ups_table)
+    else:
+        story.append(Paragraph("Brak znaczących wzrostów w tym okresie.", normal_style))
+
+    story.append(Spacer(1, 0.5 * cm))
+
+    # Spadki
+    story.append(Paragraph("📉 TOP 5 Spadków (≤-20%)", ParagraphStyle('SubHeading', parent=heading_style, fontSize=12)))
+
+    if not downs.empty:
+        downs_data = [['SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
+        for _, row in downs.iterrows():
+            downs_data.append([
+                str(row['sku'])[:15],
+                str(row['product_name'])[:50],
+                f"{row['curr_rev']:,.2f}",
+                f"{row['rev_change_pct']:+.1f}%"
+            ])
+
+        downs_table = Table(downs_data, colWidths=[3 * cm, 8 * cm, 3 * cm, 2.5 * cm])
+        downs_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ef5350')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightpink]),
+        ]))
+        story.append(downs_table)
+    else:
+        story.append(Paragraph("Brak znaczących spadków w tym okresie.", normal_style))
+
+    # === PODSUMOWANIE ===
+    story.append(PageBreak())
+    story.append(Paragraph("Podsumowanie i Rekomendacje", heading_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    summary_points = [
+        f"Całkowita sprzedaż wyniosła {sum_curr:,.2f} {currency_symbol}, co stanowi zmianę o {delta_pct:+.1f}% w porównaniu do poprzedniego tygodnia.",
+        f"Średnia wartość koszyka (AOV) wyniosła {aov_curr:,.2f} {currency_symbol}." if pd.notna(aov_curr) else "",
+        f"Zidentyfikowano {len(ups)} produktów z wzrostem sprzedaży ≥20%." if len(ups) > 0 else "",
+        f"Odnotowano {len(downs)} produktów ze spadkiem sprzedaży ≥20%." if len(downs) > 0 else "",
+    ]
+
+    for point in summary_points:
+        if point:
+            story.append(Paragraph(f"• {point}", normal_style))
+            story.append(Spacer(1, 0.2 * cm))
+
+    # Generuj PDF
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.read()
 
 # ─────────────────────────────────────────────────────────────
 # 5) /api/dataset caller (200/202/401 handling)
@@ -1095,7 +1364,7 @@ def render_platform(platform_key: str,
 
     # Eksport
     st.subheader("📥 Eksport danych")
-    d1, d2, d3 = st.columns(3)
+    d1, d2, d3, d4 = st.columns(4)
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     d1.download_button(f"📥 Pobierz (CSV) — {platform_key}", csv_bytes, f"sprzedaz_{platform_key}.csv", "text/csv")
     excel_bytes = to_excel_bytes(df)
@@ -1105,7 +1374,32 @@ def render_platform(platform_key: str,
                                 title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
     d3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
                        f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
+    d4 = st.columns(1)[0]
+    if st.button(f"📊 Generuj Raport Kadrowy (PDF) - {platform_key}"):
+        with st.spinner("Generowanie raportu..."):
+            pdf_executive = generate_executive_pdf_report(
+                platform_key=platform_key,
+                platform_title=platform_title,
+                df=df,
+                df_top=df_top,
+                sum_curr=sum_curr,
+                sum_prev=sum_prev,
+                orders_curr=orders_curr,
+                orders_prev=orders_prev,
+                aov_curr=aov_curr,
+                aov_prev=aov_prev,
+                currency_label=currency_label,
+                currency_symbol=currency_symbol,
+                week_start=week_start,
+                week_end=week_end
+            )
 
+            st.download_button(
+                f"⬇️ Pobierz Raport Kadrowy - {platform_key}",
+                pdf_executive,
+                f"raport_kadrowy_{platform_key}_{week_start.isoformat()}.pdf",
+                "application/pdf"
+            )
     # QA / Debug
     with st.expander(f"🔧 Panel QA / Debug — {platform_key}"):
         st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))

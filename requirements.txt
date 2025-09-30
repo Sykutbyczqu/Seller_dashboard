@@ -6,3 +6,4 @@ matplotlib
 openpyxl
 folium
 streamlit-folium
+reportlab
