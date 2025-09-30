@@ -1283,12 +1283,14 @@ def render_platform(platform_key: str,
                 df_trend=df_trend,
                 with_3d=True
             )
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
 
             st.download_button(
                 f"⬇️ Pobierz Raport Kadrowy - {platform_key}",
-                pdf_executive,
-                f"raport_kadrowy_{platform_key}_{week_start.isoformat()}.pdf",
-                "application/pdf"
+                data=pdf_bytes,
+                file_name=f"raport_kadrowy_{platform_key}_{week_start.isoformat()}.pdf",
+                mime="application/pdf"
             )
     # QA / Debug
     with st.expander(f"🔧 Panel QA / Debug — {platform_key}"):
