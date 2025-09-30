@@ -1020,7 +1020,9 @@ def render_platform(platform_key: str,
             st.info(f"Brak pozycji przekraczających próg wzrostu. (Na pełnym zbiorze: {len(ups_all):,})")
         else:
             st.caption(f"Łącznie spełnia warunek: {len(ups_all):,} • Pokazuję: {min(len(ups_all), max_rows):,}")
-            st.dataframe(to_display(ups, currency_label)[selected_cols], width="stretch")
+            df_disp = to_display(ups, currency_label)
+            show_cols = [c for c in selected_cols if c in df_disp.columns] or list(df_disp.columns)
+            st.dataframe(df_disp[show_cols], width="stretch")
 
     with colB:
         st.markdown("### 📉 Spadki (≤ -próg)")
@@ -1028,7 +1030,9 @@ def render_platform(platform_key: str,
             st.info(f"Brak pozycji przekraczających próg spadku. (Na pełnym zbiorze: {len(downs_all):,})")
         else:
             st.caption(f"Łącznie spełnia warunek: {len(downs_all):,} • Pokazuję: {min(len(downs_all), max_rows):,}")
-            st.dataframe(to_display(downs, currency_label)[selected_cols], width='stretch')
+            df_disp = to_display(downs, currency_label)
+            show_cols = [c for c in selected_cols if c in df_disp.columns] or list(df_disp.columns)
+            st.dataframe(df_disp[show_cols], width='stretch')
 
     # Tabele
     ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
