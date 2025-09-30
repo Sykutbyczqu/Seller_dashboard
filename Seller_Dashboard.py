@@ -25,6 +25,18 @@ from reportlab.graphics.shapes import Drawing
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 import tempfile
+import matplotlib.pyplot as plt
+import seaborn as sns
+from mpl_toolkits.mplot3d import Axes3D
+import tempfile
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
+)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from datetime import datetime
+
 
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
@@ -473,264 +485,149 @@ def get_metabase_session() -> str | None:
         return None
 
 # Generowanie PDF
-def generate_executive_pdf_report(
-        platform_key: str,
-        platform_title: str,
-        df: pd.DataFrame,
-        df_top: pd.DataFrame,
-        sum_curr: float,
-        sum_prev: float,
-        orders_curr: int,
-        orders_prev: int,
-        aov_curr: float,
-        aov_prev: float,
-        currency_label: str,
-        currency_symbol: str,
-        week_start: date,
-        week_end: date
-) -> bytes:
+def generate_executive_pdf_report(filename: str, platform: str, currency: str,
+                                  df_top: pd.DataFrame, kpis: dict,
+                                  df_trend: pd.DataFrame | None = None,
+                                  logo_path: str | None = None,
+                                  with_3d: bool = False):
     """
-    Generuje profesjonalny raport PDF z metrykami, tabelami i wykresami.
+    Generuje profesjonalny raport sprzedaży w PDF z wykresami Matplotlib.
+
+    Args:
+        filename: ścieżka do pliku PDF
+        platform: np. "Allegro" / "eBay.de"
+        currency: np. "PLN" / "EUR"
+        df_top: DataFrame z TOP produktami
+        kpis: słownik {"sum_curr":..., "delta_abs":..., "delta_pct":...}
+        df_trend: DataFrame z trendem sprzedaży (week_start, sku, curr_rev)
+        logo_path: opcjonalna ścieżka do logo firmy (PNG)
+        with_3d: czy dodać wykres 3D trendu sprzedaży
     """
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=2 * cm,
-        leftMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm
-    )
-
-    # Style
+    doc = SimpleDocTemplate(filename, pagesize=A4,
+                            rightMargin=30, leftMargin=30,
+                            topMargin=40, bottomMargin=30)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        textColor=colors.HexColor('#1a237e'),
-        spaceAfter=30,
-        alignment=TA_CENTER
-    )
-
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=16,
-        textColor=colors.HexColor('#283593'),
-        spaceAfter=12,
-        spaceBefore=12
-    )
-
-    normal_style = styles['Normal']
-
-    # Elementy raportu
     story = []
 
-    # === STRONA TYTUŁOWA ===
-    story.append(Spacer(1, 3 * cm))
-    story.append(Paragraph(f"Raport Sprzedaży", title_style))
-    story.append(Paragraph(f"{platform_title}", heading_style))
-    story.append(Spacer(1, 1 * cm))
+    # ─────────────────────────────
+    # STRONA TYTUŁOWA
+    # ─────────────────────────────
+    title_style = ParagraphStyle("Title", fontSize=22, alignment=1, textColor=colors.HexColor("#1a237e"))
+    subtitle_style = ParagraphStyle("Subtitle", fontSize=14, alignment=1, textColor=colors.black)
 
-    period_text = f"<b>Okres:</b> {week_start.strftime('%d.%m.%Y')} - {week_end.strftime('%d.%m.%Y')}"
-    story.append(Paragraph(period_text, normal_style))
+    if logo_path:
+        story.append(Image(logo_path, width=150, height=60))
+        story.append(Spacer(1, 40))
 
-    generated_text = f"<b>Wygenerowano:</b> {datetime.now(TZ).strftime('%d.%m.%Y %H:%M')}"
-    story.append(Paragraph(generated_text, normal_style))
-
+    story.append(Paragraph(f"Raport sprzedaży – {platform}", title_style))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Waluta: {currency}", subtitle_style))
+    story.append(Paragraph(f"Data wygenerowania: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
     story.append(PageBreak())
 
-    # === EXECUTIVE SUMMARY ===
-    story.append(Paragraph("Executive Summary", heading_style))
-    story.append(Spacer(1, 0.5 * cm))
-
-    # Tabela z kluczowymi metrykami
-    delta_abs = sum_curr - sum_prev
-    delta_pct = (delta_abs / sum_prev * 100) if sum_prev else 0
-    aov_delta = aov_curr - aov_prev if (pd.notna(aov_curr) and pd.notna(aov_prev)) else 0
-
+    # ─────────────────────────────
+    # KPI
+    # ─────────────────────────────
+    story.append(Paragraph("📊 Kluczowe wskaźniki", styles["Heading2"]))
+    story.append(Spacer(1, 12))
     kpi_data = [
-        ['Metryka', 'Wartość', 'Zmiana', 'Zmiana %'],
-        [
-            'Sprzedaż',
-            f'{sum_curr:,.2f} {currency_symbol}',
-            f'{delta_abs:+,.2f} {currency_symbol}',
-            f'{delta_pct:+.1f}%'
-        ],
-        [
-            'Liczba zamówień',
-            f'{orders_curr:,}',
-            f'{orders_curr - orders_prev:+,}',
-            f'{((orders_curr - orders_prev) / orders_prev * 100):+.1f}%' if orders_prev else 'N/A'
-        ],
-        [
-            'AOV (śr. wartość koszyka)',
-            f'{aov_curr:,.2f} {currency_symbol}' if pd.notna(aov_curr) else 'N/A',
-            f'{aov_delta:+,.2f} {currency_symbol}' if pd.notna(aov_delta) else 'N/A',
-            f'{(aov_delta / aov_prev * 100):+.1f}%' if (pd.notna(aov_prev) and aov_prev > 0) else 'N/A'
-        ],
+        ["Suma sprzedaży", f"{kpis['sum_curr']:,.0f} {currency}"],
+        ["Zmiana vs poprzedni", f"{kpis['delta_abs']:,.0f} {currency}"],
+        ["Zmiana %", f"{kpis['delta_pct']:+.1f}%"],
     ]
-
-    kpi_table = Table(kpi_data, colWidths=[5 * cm, 4 * cm, 4 * cm, 3 * cm])
+    kpi_table = Table(kpi_data, colWidths=[220, 220])
     kpi_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#3f51b5')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 12),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 10),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
     ]))
-
     story.append(kpi_table)
-    story.append(Spacer(1, 1 * cm))
+    story.append(PageBreak())
 
-    # === TOP 10 PRODUKTÓW ===
-    story.append(Paragraph(f"TOP 10 Produktów wg Sprzedaży", heading_style))
-    story.append(Spacer(1, 0.3 * cm))
+    # ─────────────────────────────
+    # WYKRES TOP10 (bar chart)
+    # ─────────────────────────────
+    if not df_top.empty:
+        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        plt.figure(figsize=(7, 4))
+        sns.barplot(y="sku", x="curr_rev", data=df_top, palette="Blues_d")
+        plt.title("TOP produkty – sprzedaż tygodnia")
+        plt.xlabel(f"Sprzedaż ({currency})")
+        plt.ylabel("SKU")
+        plt.tight_layout()
+        plt.savefig(tmpfile.name)
+        plt.close()
+        story.append(Paragraph("📈 TOP 10 produktów", styles["Heading2"]))
+        story.append(Image(tmpfile.name, width=480, height=280))
+        story.append(PageBreak())
 
-    top10_data = [['#', 'SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
-    for idx, (_, row) in enumerate(df_top.head(10).iterrows(), 1):
-        top10_data.append([
-            str(idx),
-            str(row['sku'])[:20],
-            str(row['product_name'])[:40] + ('...' if len(str(row['product_name'])) > 40 else ''),
-            f"{row['curr_rev']:,.2f}",
-            f"{row['rev_change_pct']:+.1f}%" if pd.notna(row['rev_change_pct']) else 'NEW'
+    # ─────────────────────────────
+    # TREND (line chart + opcjonalnie 3D)
+    # ─────────────────────────────
+    if df_trend is not None and not df_trend.empty:
+        # 2D trend
+        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        plt.figure(figsize=(7, 4))
+        sns.lineplot(x="week_start", y="curr_rev", hue="sku", data=df_trend, marker="o")
+        plt.title("Trend sprzedaży")
+        plt.xlabel("Tydzień")
+        plt.ylabel(f"Sprzedaż ({currency})")
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(tmpfile.name)
+        plt.close()
+        story.append(Paragraph("📈 Trend sprzedaży", styles["Heading2"]))
+        story.append(Image(tmpfile.name, width=480, height=280))
+        story.append(PageBreak())
+
+        # 3D trend (opcjonalnie)
+        if with_3d:
+            tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            fig = plt.figure(figsize=(7, 5))
+            ax = fig.add_subplot(111, projection="3d")
+            for sku in df_trend["sku"].unique():
+                sub = df_trend[df_trend["sku"] == sku]
+                xs = sub["week_start"].astype("category").cat.codes
+                ys = [sku] * len(sub)
+                zs = sub["curr_rev"].values
+                ax.plot(xs, ys, zs, label=str(sku))
+            ax.set_title("Trend sprzedaży 3D")
+            ax.set_xlabel("Tydzień")
+            ax.set_ylabel("SKU")
+            ax.set_zlabel(f"Sprzedaż ({currency})")
+            plt.tight_layout()
+            plt.savefig(tmpfile.name)
+            plt.close()
+            story.append(Paragraph("📈 Trend sprzedaży 3D", styles["Heading2"]))
+            story.append(Image(tmpfile.name, width=480, height=280))
+            story.append(PageBreak())
+
+    # ─────────────────────────────
+    # TABELA TOP PRODUKTÓW
+    # ─────────────────────────────
+    story.append(Paragraph("🏆 TOP produkty", styles["Heading2"]))
+    story.append(Spacer(1, 12))
+    data = [["SKU", "Produkt", "Sprzedaż", "Zmiana %"]]
+    for _, row in df_top.iterrows():
+        color = colors.green if row["rev_change_pct"] > 0 else colors.red if row["rev_change_pct"] < 0 else colors.black
+        data.append([
+            row["sku"], row["product_name"],
+            f"{row['curr_rev']:,.0f}",
+            f"<font color='{color.rgb()}'> {row['rev_change_pct']:+.1f}% </font>"
         ])
-
-    top10_table = Table(top10_data, colWidths=[1 * cm, 3 * cm, 7 * cm, 3 * cm, 2.5 * cm])
-    top10_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#5c6bc0')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('ALIGN', (0, 0), (0, -1), 'CENTER'),
-        ('ALIGN', (-2, 0), (-1, -1), 'RIGHT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 10),
-        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 9),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+    table = Table(data, colWidths=[80, 220, 100, 100], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("ALIGN", (2, 1), (3, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
     ]))
+    story.append(table)
 
-    story.append(top10_table)
-    story.append(PageBreak())
-
-    # === WYKRES SŁUPKOWY TOP 10 ===
-    story.append(Paragraph("Wizualizacja: TOP 10 Produktów", heading_style))
-    story.append(Spacer(1, 0.5 * cm))
-
-    # Stwórz wykres słupkowy
-    drawing = Drawing(400, 250)
-    bc = VerticalBarChart()
-    bc.x = 50
-    bc.y = 50
-    bc.height = 180
-    bc.width = 300
-
-    top10_values = df_top.head(10)['curr_rev'].tolist()
-    top10_labels = [str(sku)[:15] for sku in df_top.head(10)['sku'].tolist()]
-
-    bc.data = [top10_values]
-    bc.categoryAxis.categoryNames = top10_labels
-    bc.categoryAxis.labels.angle = 45
-    bc.categoryAxis.labels.fontSize = 7
-    bc.valueAxis.valueMin = 0
-    bc.bars[0].fillColor = colors.HexColor('#42a5f5')
-
-    drawing.add(bc)
-    story.append(drawing)
-    story.append(Spacer(1, 1 * cm))
-
-    # === ANALIZA WZROSTÓW I SPADKÓW ===
-    story.append(PageBreak())
-    story.append(Paragraph("Analiza Zmian", heading_style))
-    story.append(Spacer(1, 0.3 * cm))
-
-    threshold = 20  # możesz parametryzować
-    ups = df[df['rev_change_pct'] >= threshold].sort_values('curr_rev', ascending=False).head(5)
-    downs = df[df['rev_change_pct'] <= -threshold].sort_values('curr_rev', ascending=False).head(5)
-
-    # Wzrosty
-    story.append(Paragraph("🚀 TOP 5 Wzrostów (≥20%)", ParagraphStyle('SubHeading', parent=heading_style, fontSize=12)))
-
-    if not ups.empty:
-        ups_data = [['SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
-        for _, row in ups.iterrows():
-            ups_data.append([
-                str(row['sku'])[:15],
-                str(row['product_name'])[:50],
-                f"{row['curr_rev']:,.2f}",
-                f"{row['rev_change_pct']:+.1f}%"
-            ])
-
-        ups_table = Table(ups_data, colWidths=[3 * cm, 8 * cm, 3 * cm, 2.5 * cm])
-        ups_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#66bb6a')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgreen]),
-        ]))
-        story.append(ups_table)
-    else:
-        story.append(Paragraph("Brak znaczących wzrostów w tym okresie.", normal_style))
-
-    story.append(Spacer(1, 0.5 * cm))
-
-    # Spadki
-    story.append(Paragraph("📉 TOP 5 Spadków (≤-20%)", ParagraphStyle('SubHeading', parent=heading_style, fontSize=12)))
-
-    if not downs.empty:
-        downs_data = [['SKU', 'Produkt', 'Sprzedaż', 'Zmiana %']]
-        for _, row in downs.iterrows():
-            downs_data.append([
-                str(row['sku'])[:15],
-                str(row['product_name'])[:50],
-                f"{row['curr_rev']:,.2f}",
-                f"{row['rev_change_pct']:+.1f}%"
-            ])
-
-        downs_table = Table(downs_data, colWidths=[3 * cm, 8 * cm, 3 * cm, 2.5 * cm])
-        downs_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#ef5350')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightpink]),
-        ]))
-        story.append(downs_table)
-    else:
-        story.append(Paragraph("Brak znaczących spadków w tym okresie.", normal_style))
-
-    # === PODSUMOWANIE ===
-    story.append(PageBreak())
-    story.append(Paragraph("Podsumowanie i Rekomendacje", heading_style))
-    story.append(Spacer(1, 0.3 * cm))
-
-    summary_points = [
-        f"Całkowita sprzedaż wyniosła {sum_curr:,.2f} {currency_symbol}, co stanowi zmianę o {delta_pct:+.1f}% w porównaniu do poprzedniego tygodnia.",
-        f"Średnia wartość koszyka (AOV) wyniosła {aov_curr:,.2f} {currency_symbol}." if pd.notna(aov_curr) else "",
-        f"Zidentyfikowano {len(ups)} produktów z wzrostem sprzedaży ≥20%." if len(ups) > 0 else "",
-        f"Odnotowano {len(downs)} produktów ze spadkiem sprzedaży ≥20%." if len(downs) > 0 else "",
-    ]
-
-    for point in summary_points:
-        if point:
-            story.append(Paragraph(f"• {point}", normal_style))
-            story.append(Spacer(1, 0.2 * cm))
-
-    # Generuj PDF
+    # ─────────────────────────────
+    # GENEROWANIE PDF
+    # ─────────────────────────────
     doc.build(story)
-    buffer.seek(0)
-    return buffer.read()
 
 # ─────────────────────────────────────────────────────────────
 # 5) /api/dataset caller (200/202/401 handling)
