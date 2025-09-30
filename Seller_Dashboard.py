@@ -897,12 +897,12 @@ def render_platform(platform_key: str,
 
     st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.0f} {currency_symbol}".replace(",", " "))
-    c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.0f} {currency_symbol}".replace(",", " "))
-    c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
+    c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.2f} {currency_symbol}".replace(",", " "))
+    c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.2f} {currency_symbol}".replace(",", " "))
+    c3.metric("Zmiana % całości", f"{delta_pct:+.2f}%")
     if pd.notna(aov_curr):
-        delta_str = (f"{aov_delta:+,.0f} {currency_symbol}".replace(",", " ")) if pd.notna(aov_delta) else "—"
-        c4.metric("Średnia wartość koszyka", f"{aov_curr:,.0f} {currency_symbol}".replace(",", " "), delta=delta_str)
+        delta_str = (f"{aov_delta:+,.2f} {currency_symbol}".replace(",", " ")) if pd.notna(aov_delta) else "—"
+        c4.metric("Średnia wartość koszyka", f"{aov_curr:,.2f} {currency_symbol}".replace(",", " "), delta=delta_str)
     else:
         c4.metric("Średnia wartość koszyka", "—", delta="—")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -911,8 +911,11 @@ def render_platform(platform_key: str,
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
     colors = df_top["color_rev"].tolist()
     hover = df_top.apply(
-        lambda
-            r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
+        lambda r: (
+            f"{r.sku} — {r.product_name}"
+            f"<br>Sprzedaż: {r.curr_rev:,.2f} {currency_symbol}".replace(",", " ")
+            + ("" if pd.isna(r.rev_change_pct) else f"<br>Zmiana: {r.rev_change_pct:+.2f}%")
+        ),
         axis=1
     )
     fig = go.Figure(go.Bar(
@@ -940,7 +943,7 @@ def render_platform(platform_key: str,
         x=x,
         y=y,
         measure=measures,
-        text=[f"{v:,.0f}" for v in y],
+        text=[f"{v:,.2f}" for v in y],
         textposition="outside"
     ))
     fig_wf.update_traces(
@@ -1013,9 +1016,9 @@ def render_platform(platform_key: str,
                 hovertemplate = (
                         "<b>%{fullData.name}</b><br>"
                         "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
-                        "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
-                                                                   "Ilość: %{customdata[0]:,.0f} szt.<br>"
-                                                                   "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
+                        "Sprzedaż: %{y:,.2f} " + currency_symbol + "<br>"
+                                                                   "Ilość: %{customdata[0]:,.2f} szt.<br>"
+                                                                   "WoW: %{customdata[1]:+,.2f} " + currency_symbol + " (%{customdata[2]:+.2f}%)"
                                                                                                                       "<extra></extra>"
                 )
 
