@@ -372,12 +372,10 @@ WITH params AS (
     ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
     {{week_start}}::date AS prev_end
 ),
-lines AS (
-  SELECT
+orders_raw AS (
+  SELECT DISTINCT
     s.id AS order_id,
-    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
-    COALESCE(l.price_total, l.price_subtotal,
-             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total
+    (COALESCE(s.confirm_date, s.date_order, s.create_date)) AS order_ts
   FROM sale_order_line l
   JOIN sale_order s      ON s.id = l.order_id
   JOIN res_currency cur  ON cur.id = l.currency_id
@@ -385,38 +383,13 @@ lines AS (
     AND cur.name = 'PLN'
     AND s.name ILIKE '%Allegro%'
     AND s.name LIKE '%-1'
-    -- (opcjonalnie) wyklucz tu linie dostawy, jeśli mają identyfikowalny znacznik:
-    -- AND (l.is_delivery IS FALSE OR l.is_delivery IS NULL)
-),
-orders_sum AS (
-  SELECT order_id, SUM(line_total) AS order_total,
-         (order_ts AT TIME ZONE 'Europe/Warsaw') AS ts_pl
-  FROM lines
-  GROUP BY order_id, ts_pl
-),
-curr AS (
-  SELECT
-    AVG(order_total)::numeric AS aov_curr,
-    SUM(order_total)::numeric AS rev_curr,
-    COUNT(*)::int AS orders_curr
-  FROM orders_sum
-  WHERE ts_pl >= (SELECT week_start FROM params)
-    AND ts_pl <  (SELECT week_end   FROM params)
-),
-prev AS (
-  SELECT
-    AVG(order_total)::numeric AS aov_prev,
-    SUM(order_total)::numeric AS rev_prev,
-    COUNT(*)::int AS orders_prev
-  FROM orders_sum
-  WHERE ts_pl >= (SELECT prev_start FROM params)
-    AND ts_pl <  (SELECT prev_end   FROM params)
 )
 SELECT
-  curr.aov_curr, prev.aov_prev,
-  curr.rev_curr, prev.rev_prev,
-  curr.orders_curr, prev.orders_prev
-FROM curr, prev;
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.week_end)  AS orders_curr,
+  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
+FROM orders_raw, params p;
 """
 
 SQL_ORDERS_EBAY_EUR = """
@@ -783,6 +756,10 @@ COLS_DISPLAY_BASE = {
     "curr_qty": "Ilość tygodnia (szt.)",
     "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
     "qty_change_pct": "Zmiana ilości %",
+    "avg_price_week": "Śr. cena (tydzień) ({CUR}/szt.)",
+    "avg_price_prev": "Śr. cena (poprz.) ({CUR}/szt.)",
+    "avg_price_delta": "Δ ceny vs poprz. ({CUR}/szt.)",
+    "avg_price_delta_pct": "Δ ceny % vs poprz.",
     "status_rev": "Status (wartość)",
     "status_qty": "Status (ilość)"
 }
@@ -796,6 +773,10 @@ def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
         f"Sprzedaż poprzedniego tygodnia ({cur})",
         "Zmiana sprzedaży %", "Ilość tygodnia (szt.)",
         "Ilość poprzedniego tygodnia (szt.)", "Zmiana ilości %",
+        f"Śr. cena (tydzień) ({cur}/szt.)",
+        f"Śr. cena (poprz.) ({cur}/szt.)",
+        f"Δ ceny vs poprz. ({cur}/szt.)",
+        f"Δ ceny % vs poprz.",
         "Status (wartość)", "Status (ilość)"
     ] if c in out.columns]
     return out[keep]
@@ -851,6 +832,21 @@ def render_platform(platform_key: str,
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
     df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
     df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
+    # Średnie ceny: tydzień, poprzedni, oraz delta i delta %
+    df_top["avg_price_week"] = np.where(df_top["curr_qty"] > 0, df_top["curr_rev"] / df_top["curr_qty"], np.nan)
+    df_top["avg_price_prev"] = np.where(df_top["prev_qty"] > 0, df_top["prev_rev"] / df_top["prev_qty"], np.nan)
+    df_top["avg_price_delta"] = df_top["avg_price_week"] - df_top["avg_price_prev"]
+    df_top["avg_price_delta_pct"] = np.where(
+        (df_top["avg_price_prev"] > 0) & np.isfinite(df_top["avg_price_prev"]),
+        (df_top["avg_price_week"] - df_top["avg_price_prev"]) / df_top["avg_price_prev"] * 100.0,
+        np.nan
+    )
+    # Zaokrąglenia (prezentacja)
+    df_top["avg_price_week"] = df_top["avg_price_week"].round(2)
+    df_top["avg_price_prev"] = df_top["avg_price_prev"].round(2)
+    df_top["avg_price_delta"] = df_top["avg_price_delta"].round(2)
+    df_top["avg_price_delta_pct"] = df_top["avg_price_delta_pct"].round(1)
+
 
     # KPI sumy
     sum_curr = float(df["curr_rev"].sum() or 0)
