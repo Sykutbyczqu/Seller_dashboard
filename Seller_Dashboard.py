@@ -77,7 +77,8 @@ ZIP_TO_REGION = {
     "40": "Slaskie", "41": "Slaskie", "42": "Slaskie", "43": "Slaskie", "44": "Slaskie",
 
     # Swietokrzyskie
-    "25": "Swietokrzyskie", "26": "Swietokrzyskie", "27": "Swietokrzyskie", "28": "Swietokrzyskie", "29": "Swietokrzyskie",
+    "25": "Swietokrzyskie", "26": "Swietokrzyskie", "27": "Swietokrzyskie", "28": "Swietokrzyskie",
+    "29": "Swietokrzyskie",
 
     # Warminsko-Mazurskie
     "10": "Warminsko-Mazurskie", "11": "Warminsko-Mazurskie", "12": "Warminsko-Mazurskie",
@@ -446,6 +447,7 @@ SELECT
 FROM orders_raw, params p;
 """
 
+
 # ─────────────────────────────────────────────────────────────
 # 4) Metabase session (cache)
 # ─────────────────────────────────────────────────────────────
@@ -459,6 +461,7 @@ def get_metabase_session() -> str | None:
     except Exception as e:
         st.error(f"❌ Błąd logowania do Metabase: {e}")
         return None
+
 
 # ─────────────────────────────────────────────────────────────
 # 5) /api/dataset caller (200/202/401 handling)
@@ -507,6 +510,7 @@ def _dataset_call(sql_text: str, params: dict, session: str, poll_max_s: float =
 
     return {"status": r.status_code, "json": (r.json() if r.content else None), "text": r.text}
 
+
 # ─────────────────────────────────────────────────────────────
 # 6) Metabase JSON → DataFrame (robust)
 # ─────────────────────────────────────────────────────────────
@@ -531,7 +535,8 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
                 df = pd.DataFrame(rows)
             else:
                 n = len(rows[0])
-                expected = ["sku","product_name","curr_rev","curr_qty","prev_rev","prev_qty","rev_change_pct","qty_change_pct"]
+                expected = ["sku", "product_name", "curr_rev", "curr_qty", "prev_rev", "prev_qty", "rev_change_pct",
+                            "qty_change_pct"]
                 col_names = expected[:n] if n == 8 else [f"c{i}" for i in range(n)]
                 df = pd.DataFrame(rows, columns=col_names)
         return df
@@ -540,6 +545,7 @@ def _metabase_json_to_df(j: dict) -> pd.DataFrame:
         return pd.DataFrame(j)
 
     return pd.DataFrame()
+
 
 # ─────────────────────────────────────────────────────────────
 # 7) Zapytania pomocnicze
@@ -560,7 +566,7 @@ def query_snapshot(sql_text: str, week_start_iso: str) -> pd.DataFrame:
     st.session_state["mb_last_status"] = res["status"]
     st.session_state["mb_last_json"] = res["json"]
     if res["status"] not in (200, 202) or not res["json"]:
-        st.error(f"❌ Metabase HTTP {res['status']}: {str(res.get('text',''))[:300]}")
+        st.error(f"❌ Metabase HTTP {res['status']}: {str(res.get('text', ''))[:300]}")
         return pd.DataFrame()
     df = _metabase_json_to_df(res["json"])
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
@@ -568,6 +574,7 @@ def query_snapshot(sql_text: str, week_start_iso: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
 
 @st.cache_data(ttl=600)
 def query_order_counts(sql_text: str, week_start_iso: str) -> pd.DataFrame:
@@ -591,6 +598,7 @@ def query_order_counts(sql_text: str, week_start_iso: str) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     return df
+
 
 @st.cache_data(ttl=600)
 def query_trend_many_weeks(sql_text: str, week_start_date: date, weeks: int = 8) -> pd.DataFrame:
@@ -708,6 +716,7 @@ ORDER BY receiver_zip, revenue DESC;
         st.error(f"Błąd pobierania danych: {e}")
         return pd.DataFrame()
 
+
 # ─────────────────────────────────────────────────────────────
 # 8) UI — wspólne filtry
 # ─────────────────────────────────────────────────────────────
@@ -715,6 +724,7 @@ def last_completed_week_start(today: date | None = None) -> date:
     d = today or datetime.now(TZ).date()
     offset = d.weekday() + 7
     return d - timedelta(days=offset)
+
 
 st.sidebar.header("🔎 Filtry")
 default_week = last_completed_week_start()
@@ -732,20 +742,22 @@ debug_api = st.sidebar.checkbox("Debug API", value=False)
 
 st.caption(f"Tydzień: **{week_start} → {week_end - timedelta(days=1)}**  •  Strefa: Europe/Warsaw")
 
+
 # ─────────────────────────────────────────────────────────────
 # 9) Wspólne pomocnicze
 # ─────────────────────────────────────────────────────────────
 def classify_change_symbol(pct: float | np.floating | None, threshold: float):
-    if pd.isna(pct): return ("—","#9e9e9e")
+    if pd.isna(pct): return ("—", "#9e9e9e")
     if pct >= threshold:
-        if pct >= threshold * 4: return ("🟢⬆️⬆️","#2e7d32")
-        if pct >= threshold * 2: return ("🟢⬆️","#388e3c")
-        return ("🟢↑","#66bb6a")
+        if pct >= threshold * 4: return ("🟢⬆️⬆️", "#2e7d32")
+        if pct >= threshold * 2: return ("🟢⬆️", "#388e3c")
+        return ("🟢↑", "#66bb6a")
     if pct <= -threshold:
-        if pct <= -threshold * 4: return ("🔴⬇️⬇️","#b71c1c")
-        if pct <= -threshold * 2: return ("🔴⬇️","#d32f2f")
-        return ("🔴↓","#ef5350")
-    return ("⚪≈","#9e9e9e")
+        if pct <= -threshold * 4: return ("🔴⬇️⬇️", "#b71c1c")
+        if pct <= -threshold * 2: return ("🔴⬇️", "#d32f2f")
+        return ("🔴↓", "#ef5350")
+    return ("⚪≈", "#9e9e9e")
+
 
 COLS_DISPLAY_BASE = {
     "sku": "SKU",
@@ -764,6 +776,7 @@ COLS_DISPLAY_BASE = {
     "status_qty": "Status (ilość)"
 }
 
+
 def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
     cols = {k: (v.replace("{CUR}", cur)) for k, v in COLS_DISPLAY_BASE.items()}
     out = df_in.rename(columns=cols)
@@ -779,19 +792,15 @@ def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
         f"Δ ceny % vs poprz.",
         "Status (wartość)", "Status (ilość)"
     ] if c in out.columns]
-    # Zaokrąglij wszystkie kolumny liczbowe do 2 miejsc (prezentacja)
-    _out = out[keep].copy()
-    num_cols = _out.select_dtypes(include=['number']).columns
-    if len(num_cols) > 0:
-        _out[num_cols] = _out[num_cols].astype(float).round(2)
-    return _out
     return out[keep]
+
 
 def to_excel_bytes(dframe: pd.DataFrame) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         dframe.to_excel(writer, index=False, sheet_name="sprzedaz")
     return output.getvalue()
+
 
 def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf = io.BytesIO()
@@ -809,6 +818,7 @@ def df_to_pdf_bytes(dframe: pd.DataFrame, title: str = "Raport") -> bytes:
     buf.seek(0)
     return buf.read()
 
+
 # ─────────────────────────────────────────────────────────────
 # 10) Renderer platformy (z AOV i bogatym hoverem)
 # ─────────────────────────────────────────────────────────────
@@ -818,7 +828,6 @@ def render_platform(platform_key: str,
                     sql_orders: str,
                     currency_label: str,
                     currency_symbol: str):
-
     st.header(platform_title)
 
     # Snapshot SKU
@@ -827,7 +836,7 @@ def render_platform(platform_key: str,
         st.warning(f"Brak danych dla wybranego tygodnia ({currency_label}).")
         return
 
-    need = {"sku","product_name","curr_rev","prev_rev","curr_qty","prev_qty","rev_change_pct","qty_change_pct"}
+    need = {"sku", "product_name", "curr_rev", "prev_rev", "curr_qty", "prev_qty", "rev_change_pct", "qty_change_pct"}
     missing = [c for c in need if c not in df.columns]
     if missing:
         st.error(f"Brak kolumn w danych: {missing}")
@@ -835,7 +844,7 @@ def render_platform(platform_key: str,
         return
 
     # 👉 ŚREDNIE CENY NA PEŁNYM ZBIORZE (df) – potrzebne dla tabel Wzrosty/Spadki
-    if {"curr_rev","curr_qty","prev_rev","prev_qty"}.issubset(df.columns):
+    if {"curr_rev", "curr_qty", "prev_rev", "prev_qty"}.issubset(df.columns):
         df["avg_price_week"] = np.where(df["curr_qty"] > 0, df["curr_rev"] / df["curr_qty"], np.nan)
         df["avg_price_prev"] = np.where(df["prev_qty"] > 0, df["prev_rev"] / df["prev_qty"], np.nan)
         df["avg_price_delta"] = df["avg_price_week"] - df["avg_price_prev"]
@@ -852,8 +861,10 @@ def render_platform(platform_key: str,
 
     # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
-    df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
-    df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
+    df_top["status_rev"], df_top["color_rev"] = zip(
+        *df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
+    df_top["status_qty"], df_top["color_qty"] = zip(
+        *df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
 
     # KPI sumy
     sum_curr = float(df["curr_rev"].sum() or 0)
@@ -900,7 +911,8 @@ def render_platform(platform_key: str,
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
     colors = df_top["color_rev"].tolist()
     hover = df_top.apply(
-        lambda r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
+        lambda
+            r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
         axis=1
     )
     fig = go.Figure(go.Bar(
@@ -946,15 +958,30 @@ def render_platform(platform_key: str,
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
     else:
+
         all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
 
-        search_term = st.text_input(f"Szukaj SKU lub produktu — {platform_key}", "")
-        filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()] if search_term else all_skus
+        # Domyślne TOP5 wg sumarycznej sprzedaży w horyzoncie trendu (bezpieczny fallback gdy filtr jest pusty)
+        try:
+            top_by_rev = (df_trend.groupby('sku', as_index=False)['curr_rev']
+                          .sum().sort_values('curr_rev', ascending=False)['sku'].head(5).tolist())
+        except Exception:
+            top_by_rev = all_skus[:5]
 
+        search_term = st.text_input(f"Szukaj SKU lub produktu — {platform_key}", "")
+        if search_term:
+            filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()]
+            if not filtered_skus:
+                st.info("🔎 Brak wyników dla filtra — pokazuję listę wszystkich SKU.")
+                filtered_skus = all_skus
+        else:
+            filtered_skus = all_skus
+
+        default_selection = [sku for sku in top_by_rev if sku in filtered_skus][:5] or filtered_skus[:5]
         pick_skus = st.multiselect(
             f"Wybierz SKU do analizy trendu — {platform_key}",
             options=filtered_skus,
-            default=filtered_skus[:5] if filtered_skus else []
+            default=default_selection
         )
 
         chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=1, horizontal=True)
@@ -984,12 +1011,12 @@ def render_platform(platform_key: str,
 
                 custom = np.column_stack([q, wow_abs, wow_pct, week_end_labels])
                 hovertemplate = (
-                    "<b>%{fullData.name}</b><br>"
-                    "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
-                    "Sprzedaż: %{y:,.2f} " + currency_symbol + "<br>"
-                    "Ilość: %{customdata[0]:,.2f} szt.<br>"
-                    "WoW: %{customdata[1]:+,.2f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
-                    "<extra></extra>"
+                        "<b>%{fullData.name}</b><br>"
+                        "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
+                        "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
+                                                                   "Ilość: %{customdata[0]:,.0f} szt.<br>"
+                                                                   "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
+                                                                                                                      "<extra></extra>"
                 )
 
                 if chart_type == "area":
@@ -999,9 +1026,22 @@ def render_platform(platform_key: str,
                             stackgroup="one", customdata=custom, hovertemplate=hovertemplate
                         )
                     )
+                else:
+                    fig_tr.add_trace(
+                        go.Scatter(
+                            x=pv_rev.index, y=y, name=sku, mode="lines",
+                            customdata=custom, hovertemplate=hovertemplate
+                        )
+                    )
+
+            fig_tr.update_layout(height=460, xaxis_title="Tydzień", yaxis_title=f"Sprzedaż ({currency_label})")
+            st.plotly_chart(fig_tr, use_container_width=True)
+
     # Tabele — REALNA skala (pełny df), z limitem i wyborem kolumn
-    max_rows = st.sidebar.slider("Limit wierszy w tabelach (Wzrosty/Spadki)", 10, 500, 100, step=10, key=f"max_rows_{platform_key}")
-    include_new = st.sidebar.checkbox("Traktuj nowe SKU (prev=0 & curr>0) jako wzrost", value=True, key=f"incl_new_{platform_key}")
+    max_rows = st.sidebar.slider("Limit wierszy w tabelach (Wzrosty/Spadki)", 10, 500, 100, step=10,
+                                 key=f"max_rows_{platform_key}")
+    include_new = st.sidebar.checkbox("Traktuj nowe SKU (prev=0 & curr>0) jako wzrost", value=True,
+                                      key=f"incl_new_{platform_key}")
 
     cond_up = (df["rev_change_pct"] >= threshold_rev)
     if include_new:
@@ -1027,7 +1067,6 @@ def render_platform(platform_key: str,
         selected_cols = available_cols
 
     colA, colB = st.columns(2)
-    colA, colB = st.columns(2)
     with colA:
         st.markdown("### 🚀 Wzrosty (≥ próg)")
         if ups.empty:
@@ -1048,24 +1087,6 @@ def render_platform(platform_key: str,
             show_cols = [c for c in selected_cols if c in df_disp.columns] or list(df_disp.columns)
             st.dataframe(df_disp[show_cols], width='stretch')
 
-    # Tabele
-    ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
-    downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
-
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("### 🚀 Wzrosty (≥ próg)")
-        if ups.empty:
-            st.info("Brak pozycji przekraczających próg wzrostu.")
-        else:
-            st.dataframe(to_display(ups, currency_label), width="stretch")
-    with colB:
-        st.markdown("### 📉 Spadki (≤ -próg)")
-        if downs.empty:
-            st.info("Brak pozycji przekraczających próg spadku.")
-        else:
-            st.dataframe(to_display(downs, currency_label), width="stretch")
-
     with st.expander("🔎 Podgląd TOP (tabela)"):
         st.dataframe(to_display(df_top, currency_label), width="stretch")
 
@@ -1077,7 +1098,8 @@ def render_platform(platform_key: str,
     excel_bytes = to_excel_bytes(df)
     d2.download_button(f"📥 Pobierz (Excel) — {platform_key}", excel_bytes, f"sprzedaz_{platform_key}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    pdf_bytes = df_to_pdf_bytes(to_display(df_top, currency_label), title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
+    pdf_bytes = df_to_pdf_bytes(to_display(df_top, currency_label),
+                                title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
     d3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
                        f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
 
@@ -1090,6 +1112,7 @@ def render_platform(platform_key: str,
         if debug_api:
             st.subheader("Raw JSON (Metabase)")
             st.json(st.session_state.get("mb_last_json"))
+
 
 # Mapa polski
 def render_poland_map(week_start: date):
@@ -1259,9 +1282,11 @@ def render_poland_map(week_start: date):
                 columns={"region": "Województwo", "revenue_formatted": "Przychód"}),
             use_container_width=True,
             hide_index=True
-        )# 11) Zakładki
+        )  # 11) Zakładki
+
+
 # ─────────────────────────────────────────────────────────────
-tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)","🇵🇱 Polska — mapa wg województw"])
+tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)", "🇵🇱 Polska — mapa wg województw"])
 
 with tabs[0]:
     render_platform(
