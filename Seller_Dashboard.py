@@ -15,28 +15,6 @@ import requests
 import streamlit as st
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-from reportlab.graphics.shapes import Drawing
-from reportlab.graphics.charts.barcharts import VerticalBarChart
-from reportlab.graphics.charts.linecharts import HorizontalLineChart
-import tempfile
-import matplotlib.pyplot as plt
-import seaborn as sns
-from mpl_toolkits.mplot3d import Axes3D
-import tempfile
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from datetime import datetime
-
 
 # ─────────────────────────────────────────────────────────────
 # 1) Konfiguracja aplikacji
@@ -414,6 +392,77 @@ SELECT
                    AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
 FROM orders_raw, params p;
 """
+# --- AOV (order-level) per platform: sum(amount_total_cur_conv - COALESCE(delivery_cost,0)) for current/prev week ---
+
+SQL_AOV_ALLEGRO_PLN = """
+WITH params AS (
+  SELECT
+    {week_start}::date AS week_start,
+    ({week_start}::date + INTERVAL '7 day') AS week_end,
+    ({week_start}::date - INTERVAL '7 day') AS prev_start,
+    {week_start}::date AS prev_end
+)
+SELECT
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.week_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_curr,
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.prev_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_prev
+FROM params p
+JOIN sale_order s ON TRUE
+JOIN res_currency cur ON cur.id = s.currency_id
+WHERE s.state IN ('sale','done')
+  AND cur.name = 'PLN'
+  AND s.name ILIKE '%Allegro%'
+  AND s.name LIKE '%-1'
+"""
+
+SQL_AOV_EBAY_EUR = """
+WITH params AS (
+  SELECT
+    {week_start}::date AS week_start,
+    ({week_start}::date + INTERVAL '7 day') AS week_end,
+    ({week_start}::date - INTERVAL '7 day') AS prev_start,
+    {week_start}::date AS prev_end
+)
+SELECT
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.week_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_curr,
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.prev_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_prev
+FROM params p
+JOIN sale_order s ON TRUE
+JOIN res_currency cur ON cur.id = s.currency_id
+WHERE s.state IN ('sale','done')
+  AND cur.name = 'EUR'
+  AND s.name ILIKE '%eBay%'
+"""
+
+SQL_AOV_KAUFLAND_EUR = """
+WITH params AS (
+  SELECT
+    {week_start}::date AS week_start,
+    ({week_start}::date + INTERVAL '7 day') AS week_end,
+    ({week_start}::date - INTERVAL '7 day') AS prev_start,
+    {week_start}::date AS prev_end
+)
+SELECT
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.week_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.week_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_curr,
+  SUM(CASE WHEN (s.confirm_date AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
+            AND (s.confirm_date AT TIME ZONE 'Europe/Warsaw') <  p.prev_end
+       THEN (COALESCE(s.amount_total_cur_conv, 0) - COALESCE(s.delivery_cost, 0)) ELSE 0 END) AS rev_prev
+FROM params p
+JOIN sale_order s ON TRUE
+JOIN res_currency cur ON cur.id = s.currency_id
+WHERE s.state IN ('sale','done')
+  AND cur.name = 'EUR'
+  AND s.name ILIKE '%Kaufland%'
+"""
 
 SQL_ORDERS_EBAY_EUR = """
 WITH params AS (
@@ -484,150 +533,6 @@ def get_metabase_session() -> str | None:
         st.error(f"❌ Błąd logowania do Metabase: {e}")
         return None
 
-# Generowanie PDF
-def generate_executive_pdf_report(filename: str, platform: str, currency: str,
-                                  df_top: pd.DataFrame, kpis: dict,
-                                  df_trend: pd.DataFrame | None = None,
-                                  with_3d: bool = False):
-    """
-    Generuje profesjonalny raport sprzedaży w PDF z wykresami Matplotlib.
-
-    Args:
-        filename: ścieżka do pliku PDF
-        platform: np. "Allegro" / "eBay.de"
-        currency: np. "PLN" / "EUR"
-        df_top: DataFrame z TOP produktami
-        kpis: słownik {"sum_curr":..., "delta_abs":..., "delta_pct":...}
-        df_trend: DataFrame z trendem sprzedaży (week_start, sku, curr_rev)
-        logo_path: opcjonalna ścieżka do logo firmy (PNG)
-        with_3d: czy dodać wykres 3D trendu sprzedaży
-    """
-    doc = SimpleDocTemplate(filename, pagesize=A4,
-                            rightMargin=30, leftMargin=30,
-                            topMargin=40, bottomMargin=30)
-    styles = getSampleStyleSheet()
-    story = []
-
-    # ─────────────────────────────
-    # STRONA TYTUŁOWA
-    # ─────────────────────────────
-    title_style = ParagraphStyle("Title", fontSize=22, alignment=1, textColor=colors.HexColor("#1a237e"))
-    subtitle_style = ParagraphStyle("Subtitle", fontSize=14, alignment=1, textColor=colors.black)
-
-    # ─────────────────────────────
-    # KPI
-    # ─────────────────────────────
-    story.append(Paragraph("📊 Kluczowe wskaźniki", styles["Heading2"]))
-    story.append(Spacer(1, 12))
-    kpi_data = [
-        ["Suma sprzedaży", f"{kpis['sum_curr']:,.0f} {currency}"],
-        ["Zmiana vs poprzedni", f"{kpis['delta_abs']:,.0f} {currency}"],
-        ["Zmiana %", f"{kpis['delta_pct']:+.1f}%"],
-    ]
-    kpi_table = Table(kpi_data, colWidths=[220, 220])
-    kpi_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-    ]))
-    story.append(kpi_table)
-    story.append(PageBreak())
-
-    # ─────────────────────────────
-    # WYKRES TOP10 (bar chart)
-    # ─────────────────────────────
-    if not df_top.empty:
-        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        plt.figure(figsize=(7, 4))
-        sns.barplot(y="sku", x="curr_rev", data=df_top, palette="Blues_d")
-        plt.title("TOP produkty – sprzedaż tygodnia")
-        plt.xlabel(f"Sprzedaż ({currency})")
-        plt.ylabel("SKU")
-        plt.tight_layout()
-        plt.savefig(tmpfile.name)
-        plt.close()
-        story.append(Paragraph("📈 TOP 10 produktów", styles["Heading2"]))
-        story.append(Image(tmpfile.name, width=480, height=280))
-        story.append(PageBreak())
-
-    # ─────────────────────────────
-    # TREND (line chart + opcjonalnie 3D)
-    # ─────────────────────────────
-    if df_trend is not None and not df_trend.empty:
-        # 2D trend
-        tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        plt.figure(figsize=(7, 4))
-        sns.lineplot(x="week_start", y="curr_rev", hue="sku", data=df_trend, marker="o")
-        plt.title("Trend sprzedaży")
-        plt.xlabel("Tydzień")
-        plt.ylabel(f"Sprzedaż ({currency})")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(tmpfile.name)
-        plt.close()
-        story.append(Paragraph("📈 Trend sprzedaży", styles["Heading2"]))
-        story.append(Image(tmpfile.name, width=480, height=280))
-        story.append(PageBreak())
-
-        # 3D trend (opcjonalnie)
-        if with_3d:
-            tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-            fig = plt.figure(figsize=(7, 5))
-            ax = fig.add_subplot(111, projection="3d")
-
-            # zakoduj SKU jako liczby
-            sku_codes = {sku: i for i, sku in enumerate(df_trend["sku"].unique())}
-
-            for sku in df_trend["sku"].unique():
-                sub = df_trend[df_trend["sku"] == sku]
-                xs = sub["week_start"].astype("category").cat.codes
-                ys = [sku_codes[sku]] * len(sub)
-                zs = sub["curr_rev"].values
-                ax.plot(xs, ys, zs, label=str(sku))
-
-            # etykiety osi
-            ax.set_title("Trend sprzedaży 3D")
-            ax.set_xlabel("Tydzień")
-            ax.set_ylabel("SKU")
-            ax.set_zlabel(f"Sprzedaż ({currency})")
-
-            # podmiana ticków na SKU
-            ax.set_yticks(list(sku_codes.values()))
-            ax.set_yticklabels(list(sku_codes.keys()))
-
-            plt.tight_layout()
-            plt.savefig(tmpfile.name)
-            plt.close()
-            story.append(Paragraph("📈 Trend sprzedaży 3D", styles["Heading2"]))
-            story.append(Image(tmpfile.name, width=480, height=280))
-            story.append(PageBreak())
-
-    # ─────────────────────────────
-    # TABELA TOP PRODUKTÓW
-    # ─────────────────────────────
-    story.append(Paragraph("🏆 TOP produkty", styles["Heading2"]))
-    story.append(Spacer(1, 12))
-    data = [["SKU", "Produkt", "Sprzedaż", "Zmiana %"]]
-    for _, row in df_top.iterrows():
-        color = colors.green if row["rev_change_pct"] > 0 else colors.red if row["rev_change_pct"] < 0 else colors.black
-        data.append([
-            row["sku"], row["product_name"],
-            f"{row['curr_rev']:,.0f}",
-            f"<font color='{color.rgb()}'> {row['rev_change_pct']:+.1f}% </font>"
-        ])
-    table = Table(data, colWidths=[80, 220, 100, 100], repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a237e")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("ALIGN", (2, 1), (3, -1), "RIGHT"),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-    ]))
-    story.append(table)
-
-    # ─────────────────────────────
-    # GENEROWANIE PDF
-    # ─────────────────────────────
-    doc.build(story)
 
 # ─────────────────────────────────────────────────────────────
 # 5) /api/dataset caller (200/202/401 handling)
@@ -763,6 +668,29 @@ def query_order_counts(sql_text: str, week_start_iso: str) -> pd.DataFrame:
     for col in ["orders_curr", "orders_prev"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    return df
+
+
+def query_aov_sums(sql_text: str, week_start_iso: str) -> pd.DataFrame:
+    """Zwraca sumy przychodów z poziomu zamówień (rev_curr, rev_prev) z odjętym delivery_cost."""
+    session = get_metabase_session()
+    if not session:
+        return pd.DataFrame()
+    res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+    if res["status"] == 401:
+        get_metabase_session.clear()
+        session = get_metabase_session()
+        if not session:
+            st.error("❌ Nie udało się odświeżyć sesji Metabase.")
+            return pd.DataFrame()
+        res = _dataset_call(sql_text, {"week_start": week_start_iso}, session)
+    if res["status"] not in (200, 202) or not res["json"]:
+        return pd.DataFrame()
+    df = _metabase_json_to_df(res["json"])
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    for col in ["rev_curr", "rev_prev"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     return df
 
 
@@ -934,10 +862,6 @@ COLS_DISPLAY_BASE = {
     "curr_qty": "Ilość tygodnia (szt.)",
     "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
     "qty_change_pct": "Zmiana ilości %",
-    "avg_price_week": "Śr. cena (tydzień) ({CUR}/szt.)",
-    "avg_price_prev": "Śr. cena (poprz.) ({CUR}/szt.)",
-    "avg_price_delta": "Δ ceny vs poprz. ({CUR}/szt.)",
-    "avg_price_delta_pct": "Δ ceny % vs poprz.",
     "status_rev": "Status (wartość)",
     "status_qty": "Status (ilość)"
 }
@@ -952,10 +876,6 @@ def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
         f"Sprzedaż poprzedniego tygodnia ({cur})",
         "Zmiana sprzedaży %", "Ilość tygodnia (szt.)",
         "Ilość poprzedniego tygodnia (szt.)", "Zmiana ilości %",
-        f"Śr. cena (tydzień) ({cur}/szt.)",
-        f"Śr. cena (poprz.) ({cur}/szt.)",
-        f"Δ ceny vs poprz. ({cur}/szt.)",
-        f"Δ ceny % vs poprz.",
         "Status (wartość)", "Status (ilość)"
     ] if c in out.columns]
     return out[keep]
@@ -993,7 +913,7 @@ def render_platform(platform_key: str,
                     sql_query: str,
                     sql_orders: str,
                     currency_label: str,
-                    currency_symbol: str):
+                    currency_symbol: str, sql_aov: str = None):
     st.header(platform_title)
 
     # Snapshot SKU
@@ -1008,22 +928,6 @@ def render_platform(platform_key: str,
         st.error(f"Brak kolumn w danych: {missing}")
         st.dataframe(df.head(), width="stretch")
         return
-
-    # 👉 ŚREDNIE CENY NA PEŁNYM ZBIORZE (df) – potrzebne dla tabel Wzrosty/Spadki
-    if {"curr_rev", "curr_qty", "prev_rev", "prev_qty"}.issubset(df.columns):
-        df["avg_price_week"] = np.where(df["curr_qty"] > 0, df["curr_rev"] / df["curr_qty"], np.nan)
-        df["avg_price_prev"] = np.where(df["prev_qty"] > 0, df["prev_rev"] / df["prev_qty"], np.nan)
-        df["avg_price_delta"] = df["avg_price_week"] - df["avg_price_prev"]
-        df["avg_price_delta_pct"] = np.where(
-            (df["avg_price_prev"] > 0) & np.isfinite(df["avg_price_prev"]),
-            (df["avg_price_week"] - df["avg_price_prev"]) / df["avg_price_prev"] * 100.0,
-            np.nan
-        )
-        # Zaokrąglenia do prezentacji
-        df["avg_price_week"] = df["avg_price_week"].round(2)
-        df["avg_price_prev"] = df["avg_price_prev"].round(2)
-        df["avg_price_delta"] = df["avg_price_delta"].round(2)
-        df["avg_price_delta_pct"] = df["avg_price_delta_pct"].round(1)
 
     # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
@@ -1043,32 +947,36 @@ def render_platform(platform_key: str,
     orders_curr = int(df_ord["orders_curr"].iloc[0]) if not df_ord.empty and "orders_curr" in df_ord.columns else 0
     orders_prev = int(df_ord["orders_prev"].iloc[0]) if not df_ord.empty and "orders_prev" in df_ord.columns else 0
 
-    aov_curr = (sum_curr / orders_curr) if orders_curr else np.nan
-    aov_prev = (sum_prev / orders_prev) if orders_prev else np.nan
+    # AOV – policz z pełnego df; domyślnie wyklucz linie dostawy (żeby koszyk nie był zawyżony)
+    exclude_delivery = st.sidebar.checkbox("Wyklucz koszty dostawy z AOV", value=True,
+                                           key=f"aov_excl_ship_{platform_key}")
+    ship_regex = r"(delivery|wysył|dostaw|kurier|paczkomat|przesył|inpost)"
+    mask_ship = (df.get("product_name", pd.Series("", index=df.index)).astype(str).str.contains(ship_regex, case=False,
+                                                                                                regex=True,
+                                                                                                na=False) | df.get(
+        "sku", pd.Series("", index=df.index)).astype(str).str.contains(ship_regex, case=False, regex=True, na=False))
+    df_aov = df[~mask_ship].copy() if exclude_delivery else df.copy()
+
+    sum_curr_aov = float(df_aov.get("curr_rev", pd.Series(dtype=float)).sum())
+    sum_prev_aov = float(df_aov.get("prev_rev", pd.Series(dtype=float)).sum())
+
+    # jeśli nie ma wyników z query_order_counts, zabezpiecz 0
+    orders_curr = int(df_ord["orders_curr"].iloc[0]) if (
+                "df_ord" in locals() and not df_ord.empty and "orders_curr" in df_ord.columns) else 0
+    orders_prev = int(df_ord["orders_prev"].iloc[0]) if (
+                "df_ord" in locals() and not df_ord.empty and "orders_prev" in df_ord.columns) else 0
+
+    aov_curr = (sum_curr_aov / orders_curr) if orders_curr else np.nan
+    aov_prev = (sum_prev_aov / orders_prev) if orders_prev else np.nan
     aov_delta = (aov_curr - aov_prev) if (pd.notna(aov_curr) and pd.notna(aov_prev)) else np.nan
-
-    # Sticky KPI
-    st.markdown("""
-        <style>
-        .sticky-kpi {
-          position: sticky;
-          top: 70px;
-          background-color: white;
-          padding: 8px;
-          z-index: 999;
-          border-bottom: 1px solid rgba(0,0,0,0.06);
-        }
-        </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="sticky-kpi">', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.2f} {currency_symbol}".replace(",", " "))
-    c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.2f} {currency_symbol}".replace(",", " "))
-    c3.metric("Zmiana % całości", f"{delta_pct:+.2f}%")
+
+    c1.metric(f"Suma sprzedaży ({currency_label}, tydzień)", f"{sum_curr:,.0f} {currency_symbol}".replace(",", " "))
+    c2.metric(f"Zmiana vs poprzedni ({currency_label})", f"{delta_abs:,.0f} {currency_symbol}".replace(",", " "))
+    c3.metric("Zmiana % całości", f"{delta_pct:+.0f}%")
     if pd.notna(aov_curr):
-        delta_str = (f"{aov_delta:+,.2f} {currency_symbol}".replace(",", " ")) if pd.notna(aov_delta) else "—"
-        c4.metric("Średnia wartość koszyka", f"{aov_curr:,.2f} {currency_symbol}".replace(",", " "), delta=delta_str)
+        delta_str = (f"{aov_delta:+,.0f} {currency_symbol}".replace(",", " ")) if pd.notna(aov_delta) else "—"
+        c4.metric("Średnia wartość koszyka", f"{aov_curr:,.0f} {currency_symbol}".replace(",", " "), delta=delta_str)
     else:
         c4.metric("Średnia wartość koszyka", "—", delta="—")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1077,11 +985,8 @@ def render_platform(platform_key: str,
     st.subheader(f"TOP {top_n} — Sprzedaż tygodnia ({currency_label})")
     colors = df_top["color_rev"].tolist()
     hover = df_top.apply(
-        lambda r: (
-            f"{r.sku} — {r.product_name}"
-            f"<br>Sprzedaż: {r.curr_rev:,.2f} {currency_symbol}".replace(",", " ")
-            + ("" if pd.isna(r.rev_change_pct) else f"<br>Zmiana: {r.rev_change_pct:+.2f}%")
-        ),
+        lambda
+            r: f"{r.sku} — {r.product_name}<br>Sprzedaż: {r.curr_rev:,.0f} {currency_symbol}<br>Zmiana: {('n/d' if pd.isna(r.rev_change_pct) else f'{r.rev_change_pct:+.0f}%')}",
         axis=1
     )
     fig = go.Figure(go.Bar(
@@ -1109,7 +1014,7 @@ def render_platform(platform_key: str,
         x=x,
         y=y,
         measure=measures,
-        text=[f"{v:,.2f}" for v in y],
+        text=[f"{v:,.0f}" for v in y],
         textposition="outside"
     ))
     fig_wf.update_traces(
@@ -1127,30 +1032,16 @@ def render_platform(platform_key: str,
     if df_trend.empty:
         st.info("Brak danych trendu (dla wybranej liczby tygodni).")
     else:
-
         all_skus = sorted(df_trend["sku"].dropna().unique().tolist())
 
-        # Domyślne TOP5 wg sumarycznej sprzedaży w horyzoncie trendu (bezpieczny fallback gdy filtr jest pusty)
-        try:
-            top_by_rev = (df_trend.groupby('sku', as_index=False)['curr_rev']
-                          .sum().sort_values('curr_rev', ascending=False)['sku'].head(5).tolist())
-        except Exception:
-            top_by_rev = all_skus[:5]
-
         search_term = st.text_input(f"Szukaj SKU lub produktu — {platform_key}", "")
-        if search_term:
-            filtered_skus = [sku for sku in all_skus if search_term.lower() in str(sku).lower()]
-            if not filtered_skus:
-                st.info("🔎 Brak wyników dla filtra — pokazuję listę wszystkich SKU.")
-                filtered_skus = all_skus
-        else:
-            filtered_skus = all_skus
+        filtered_skus = [sku for sku in all_skus if
+                         search_term.lower() in str(sku).lower()] if search_term else all_skus
 
-        default_selection = [sku for sku in top_by_rev if sku in filtered_skus][:5] or filtered_skus[:5]
         pick_skus = st.multiselect(
             f"Wybierz SKU do analizy trendu — {platform_key}",
             options=filtered_skus,
-            default=default_selection
+            default=filtered_skus[:5] if filtered_skus else []
         )
 
         chart_type = st.radio(f"Typ wykresu — {platform_key}", ["area", "line"], index=1, horizontal=True)
@@ -1182,9 +1073,9 @@ def render_platform(platform_key: str,
                 hovertemplate = (
                         "<b>%{fullData.name}</b><br>"
                         "Tydzień: %{x|%Y-%m-%d} → %{customdata[3]}<br>"
-                        "Sprzedaż: %{y:,.2f} " + currency_symbol + "<br>"
-                                                                   "Ilość: %{customdata[0]:,.2f} szt.<br>"
-                                                                   "WoW: %{customdata[1]:+,.2f} " + currency_symbol + " (%{customdata[2]:+.2f}%)"
+                        "Sprzedaż: %{y:,.0f} " + currency_symbol + "<br>"
+                                                                   "Ilość: %{customdata[0]:,.0f} szt.<br>"
+                                                                   "WoW: %{customdata[1]:+,.0f} " + currency_symbol + " (%{customdata[2]:+.0f}%)"
                                                                                                                       "<extra></extra>"
                 )
 
@@ -1198,70 +1089,43 @@ def render_platform(platform_key: str,
                 else:
                     fig_tr.add_trace(
                         go.Scatter(
-                            x=pv_rev.index, y=y, name=sku, mode="lines",
+                            x=pv_rev.index, y=y, name=sku, mode="lines+markers",
                             customdata=custom, hovertemplate=hovertemplate
                         )
                     )
 
-            fig_tr.update_layout(height=460, xaxis_title="Tydzień", yaxis_title=f"Sprzedaż ({currency_label})")
-            st.plotly_chart(fig_tr, use_container_width=True)
+            fig_tr.update_layout(
+                xaxis=dict(tickformat="%Y-%m-%d"),
+                yaxis_title=f"Sprzedaż ({currency_label})",
+                height=520,
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_tr, width="stretch")
 
-    # Tabele — REALNA skala (pełny df), z limitem i wyborem kolumn
-    max_rows = st.sidebar.slider("Limit wierszy w tabelach (Wzrosty/Spadki)", 10, 500, 100, step=10,
-                                 key=f"max_rows_{platform_key}")
-    include_new = st.sidebar.checkbox("Traktuj nowe SKU (prev=0 & curr>0) jako wzrost", value=True,
-                                      key=f"incl_new_{platform_key}")
-
-    cond_up = (df["rev_change_pct"] >= threshold_rev)
-    if include_new:
-        cond_up = cond_up | ((df["prev_rev"].fillna(0) == 0) & (df["curr_rev"].fillna(0) > 0))
-
-    ups_all = df[cond_up].copy()
-    downs_all = df[df["rev_change_pct"] <= -threshold_rev].copy()
-
-    # Sortowanie wg sprzedaży tygodnia
-    ups = ups_all.sort_values("curr_rev", ascending=False).head(max_rows)
-    downs = downs_all.sort_values("curr_rev", ascending=False).head(max_rows)
-
-    # Wybór kolumn – w Sidebar (lista z mapowania, nie z próbki danych)
-    display_map = {k: v.replace("{CUR}", currency_label) for k, v in COLS_DISPLAY_BASE.items()}
-    available_cols = list(display_map.values())
-    selected_cols = st.sidebar.multiselect(
-        "Kolumny w tabelach (Wzrosty/Spadki)",
-        options=available_cols,
-        default=available_cols,
-        key=f"cols_sel_{platform_key}"
-    )
-    if not selected_cols:
-        selected_cols = available_cols
+    # Tabele
+    ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
+    downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
 
     colA, colB = st.columns(2)
     with colA:
         st.markdown("### 🚀 Wzrosty (≥ próg)")
         if ups.empty:
-            st.info(f"Brak pozycji przekraczających próg wzrostu. (Na pełnym zbiorze: {len(ups_all):,})")
+            st.info("Brak pozycji przekraczających próg wzrostu.")
         else:
-            st.caption(f"Łącznie spełnia warunek: {len(ups_all):,} • Pokazuję: {min(len(ups_all), max_rows):,}")
-            df_disp = to_display(ups, currency_label)
-            show_cols = [c for c in selected_cols if c in df_disp.columns] or list(df_disp.columns)
-            st.dataframe(df_disp[show_cols], width="stretch")
-
+            st.dataframe(to_display(ups, currency_label), width="stretch")
     with colB:
         st.markdown("### 📉 Spadki (≤ -próg)")
         if downs.empty:
-            st.info(f"Brak pozycji przekraczających próg spadku. (Na pełnym zbiorze: {len(downs_all):,})")
+            st.info("Brak pozycji przekraczających próg spadku.")
         else:
-            st.caption(f"Łącznie spełnia warunek: {len(downs_all):,} • Pokazuję: {min(len(downs_all), max_rows):,}")
-            df_disp = to_display(downs, currency_label)
-            show_cols = [c for c in selected_cols if c in df_disp.columns] or list(df_disp.columns)
-            st.dataframe(df_disp[show_cols], width='stretch')
+            st.dataframe(to_display(downs, currency_label), width="stretch")
 
     with st.expander("🔎 Podgląd TOP (tabela)"):
         st.dataframe(to_display(df_top, currency_label), width="stretch")
 
     # Eksport
     st.subheader("📥 Eksport danych")
-    d1, d2, d3, d4 = st.columns(4)
+    d1, d2, d3 = st.columns(3)
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     d1.download_button(f"📥 Pobierz (CSV) — {platform_key}", csv_bytes, f"sprzedaz_{platform_key}.csv", "text/csv")
     excel_bytes = to_excel_bytes(df)
@@ -1271,27 +1135,7 @@ def render_platform(platform_key: str,
                                 title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
     d3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
                        f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
-    d4 = st.columns(1)[0]
-    if st.button(f"📊 Generuj Raport Kadrowy (PDF) - {platform_key}"):
-        with st.spinner("Generowanie raportu..."):
-            pdf_executive = generate_executive_pdf_report(
-                filename="raport.pdf",
-                platform="Allegro",
-                currency="PLN",
-                df_top=df_top,
-                kpis={"sum_curr": sum_curr, "delta_abs": delta_abs, "delta_pct": delta_pct},
-                df_trend=df_trend,
-                with_3d=True
-            )
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
 
-            st.download_button(
-                f"⬇️ Pobierz Raport Kadrowy - {platform_key}",
-                data=pdf_bytes,
-                file_name=f"raport_kadrowy_{platform_key}_{week_start.isoformat()}.pdf",
-                mime="application/pdf"
-            )
     # QA / Debug
     with st.expander(f"🔧 Panel QA / Debug — {platform_key}"):
         st.write("Metabase HTTP:", st.session_state.get("mb_last_status"))
@@ -1321,6 +1165,26 @@ def render_poland_map(week_start: date):
     region_totals = df_regions.groupby("region", as_index=False)["revenue"].sum().rename(
         columns={"revenue": "region_total"})
 
+    # AOV from order-level sums (amount_total_cur_conv - delivery_cost)
+    if sql_aov is not None:
+        df_aovsum = query_aov_sums(sql_aov, week_start.isoformat())
+        if df_aovsum is not None and not df_aovsum.empty:
+            sum_curr_aov = float(df_aovsum["rev_curr"].iloc[0]) if "rev_curr" in df_aovsum.columns else np.nan
+            sum_prev_aov = float(df_aovsum["rev_prev"].iloc[0]) if "rev_prev" in df_aovsum.columns else np.nan
+        else:
+            sum_curr_aov, sum_prev_aov = np.nan, np.nan
+    else:
+        sum_curr_aov = float(df.get("curr_rev", pd.Series(dtype=float)).sum())
+        sum_prev_aov = float(df.get("prev_rev", pd.Series(dtype=float)).sum())
+
+    orders_curr = int(df_ord["orders_curr"].iloc[0]) if (
+                "df_ord" in locals() and not df_ord.empty and "orders_curr" in df_ord.columns) else 0
+    orders_prev = int(df_ord["orders_prev"].iloc[0]) if (
+                "df_ord" in locals() and not df_ord.empty and "orders_prev" in df_ord.columns) else 0
+
+    aov_curr = (sum_curr_aov / orders_curr) if orders_curr else np.nan
+    aov_prev = (sum_prev_aov / orders_prev) if orders_prev else np.nan
+    aov_delta = (aov_curr - aov_prev) if (pd.notna(aov_curr) and pd.notna(aov_prev)) else np.nan
     # KPI
     st.metric("Łączna sprzedaż (wszystkie regiony)", f"{region_totals['region_total'].sum():,.0f} zł".replace(",", " "))
 
@@ -1475,6 +1339,7 @@ def render_poland_map(week_start: date):
 
 
 # ─────────────────────────────────────────────────────────────
+
 tabs = st.tabs(["🇵🇱 Allegro.pl (PLN)", "🇩🇪 eBay.de (EUR)", "🇩🇪 Kaufland.de (EUR)", "🇵🇱 Polska — mapa wg województw"])
 
 with tabs[0]:
@@ -1485,6 +1350,7 @@ with tabs[0]:
         sql_orders=SQL_ORDERS_ALLEGRO_PLN,
         currency_label="PLN",
         currency_symbol="zł",
+        sql_aov=SQL_AOV_ALLEGRO_PLN,
     )
 
 with tabs[1]:
@@ -1495,6 +1361,7 @@ with tabs[1]:
         sql_orders=SQL_ORDERS_EBAY_EUR,
         currency_label="EUR",
         currency_symbol="€",
+        sql_aov=SQL_AOV_EBAY_EUR,
     )
 
 with tabs[2]:
@@ -1505,6 +1372,8 @@ with tabs[2]:
         sql_orders=SQL_ORDERS_KAUFLAND_EUR,
         currency_label="EUR",
         currency_symbol="€",
+        sql_aov=SQL_AOV_KAUFLAND_EUR,
     )
+
 with tabs[3]:
     render_poland_map(week_start)
