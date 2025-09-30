@@ -488,7 +488,6 @@ def get_metabase_session() -> str | None:
 def generate_executive_pdf_report(filename: str, platform: str, currency: str,
                                   df_top: pd.DataFrame, kpis: dict,
                                   df_trend: pd.DataFrame | None = None,
-                                  logo_path: str | None = None,
                                   with_3d: bool = False):
     """
     Generuje profesjonalny raport sprzedaży w PDF z wykresami Matplotlib.
@@ -514,16 +513,6 @@ def generate_executive_pdf_report(filename: str, platform: str, currency: str,
     # ─────────────────────────────
     title_style = ParagraphStyle("Title", fontSize=22, alignment=1, textColor=colors.HexColor("#1a237e"))
     subtitle_style = ParagraphStyle("Subtitle", fontSize=14, alignment=1, textColor=colors.black)
-
-    if logo_path:
-        story.append(Image(logo_path, width=150, height=60))
-        story.append(Spacer(1, 40))
-
-    story.append(Paragraph(f"Raport sprzedaży – {platform}", title_style))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Waluta: {currency}", subtitle_style))
-    story.append(Paragraph(f"Data wygenerowania: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
-    story.append(PageBreak())
 
     # ─────────────────────────────
     # KPI
@@ -1292,7 +1281,6 @@ def render_platform(platform_key: str,
                 df_top=df_top,
                 kpis={"sum_curr": sum_curr, "delta_abs": delta_abs, "delta_pct": delta_pct},
                 df_trend=df_trend,
-                logo_path="logo.png",
                 with_3d=True
             )
 
