@@ -1275,20 +1275,14 @@ def render_platform(platform_key: str,
     if st.button(f"📊 Generuj Raport Kadrowy (PDF) - {platform_key}"):
         with st.spinner("Generowanie raportu..."):
             pdf_executive = generate_executive_pdf_report(
-                platform_key=platform_key,
-                platform_title=platform_title,
-                df=df,
+                filename="raport.pdf",
+                platform="Allegro",
+                currency="PLN",
                 df_top=df_top,
-                sum_curr=sum_curr,
-                sum_prev=sum_prev,
-                orders_curr=orders_curr,
-                orders_prev=orders_prev,
-                aov_curr=aov_curr,
-                aov_prev=aov_prev,
-                currency_label=currency_label,
-                currency_symbol=currency_symbol,
-                week_start=week_start,
-                week_end=week_end
+                kpis={"sum_curr": sum_curr, "delta_abs": delta_abs, "delta_pct": delta_pct},
+                df_trend=df_trend,
+                logo_path="logo.png",
+                with_3d=True
             )
 
             st.download_button(
