@@ -585,16 +585,27 @@ def generate_executive_pdf_report(filename: str, platform: str, currency: str,
             tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
             fig = plt.figure(figsize=(7, 5))
             ax = fig.add_subplot(111, projection="3d")
+
+            # zakoduj SKU jako liczby
+            sku_codes = {sku: i for i, sku in enumerate(df_trend["sku"].unique())}
+
             for sku in df_trend["sku"].unique():
                 sub = df_trend[df_trend["sku"] == sku]
                 xs = sub["week_start"].astype("category").cat.codes
-                ys = [sku] * len(sub)
+                ys = [sku_codes[sku]] * len(sub)
                 zs = sub["curr_rev"].values
                 ax.plot(xs, ys, zs, label=str(sku))
+
+            # etykiety osi
             ax.set_title("Trend sprzedaży 3D")
             ax.set_xlabel("Tydzień")
             ax.set_ylabel("SKU")
             ax.set_zlabel(f"Sprzedaż ({currency})")
+
+            # podmiana ticków na SKU
+            ax.set_yticks(list(sku_codes.values()))
+            ax.set_yticklabels(list(sku_codes.keys()))
+
             plt.tight_layout()
             plt.savefig(tmpfile.name)
             plt.close()
