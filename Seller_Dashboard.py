@@ -1000,13 +1000,19 @@ def render_platform(platform_key: str,
     ups = ups_all.sort_values("curr_rev", ascending=False).head(max_rows)
     downs = downs_all.sort_values("curr_rev", ascending=False).head(max_rows)
 
-    # Wybór kolumn – w Sidebar (po mapowaniu nazw)
-    tmp_for_cols = to_display(df.head(1) if not df.empty else df, currency_label)
-    available_cols = list(tmp_for_cols.columns)
-    selected_cols = st.sidebar.multiselect("Kolumny w tabelach (Wzrosty/Spadki)", options=available_cols, default=available_cols, key=f"cols_sel_{platform_key}")
+    # Wybór kolumn – w Sidebar (lista z mapowania, nie z próbki danych)
+    display_map = {k: v.replace("{CUR}", currency_label) for k, v in COLS_DISPLAY_BASE.items()}
+    available_cols = list(display_map.values())
+    selected_cols = st.sidebar.multiselect(
+        "Kolumny w tabelach (Wzrosty/Spadki)",
+        options=available_cols,
+        default=available_cols,
+        key=f"cols_sel_{platform_key}"
+    )
     if not selected_cols:
         selected_cols = available_cols
 
+    colA, colB = st.columns(2)
     colA, colB = st.columns(2)
     with colA:
         st.markdown("### 🚀 Wzrosty (≥ próg)")
