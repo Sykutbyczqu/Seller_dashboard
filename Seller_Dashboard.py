@@ -372,10 +372,12 @@ WITH params AS (
     ({{week_start}}::date - INTERVAL '7 day') AS prev_start,
     {{week_start}}::date AS prev_end
 ),
-orders_raw AS (
-  SELECT DISTINCT
+lines AS (
+  SELECT
     s.id AS order_id,
-    (COALESCE(s.confirm_date, s.date_order, s.create_date)) AS order_ts
+    COALESCE(s.confirm_date, s.date_order, s.create_date) AS order_ts,
+    COALESCE(l.price_total, l.price_subtotal,
+             l.price_unit * COALESCE(l.product_uom_qty,0), 0) AS line_total
   FROM sale_order_line l
   JOIN sale_order s      ON s.id = l.order_id
   JOIN res_currency cur  ON cur.id = l.currency_id
@@ -383,13 +385,38 @@ orders_raw AS (
     AND cur.name = 'PLN'
     AND s.name ILIKE '%Allegro%'
     AND s.name LIKE '%-1'
+    -- (opcjonalnie) wyklucz tu linie dostawy, jeśli mają identyfikowalny znacznik:
+    -- AND (l.is_delivery IS FALSE OR l.is_delivery IS NULL)
+),
+orders_sum AS (
+  SELECT order_id, SUM(line_total) AS order_total,
+         (order_ts AT TIME ZONE 'Europe/Warsaw') AS ts_pl
+  FROM lines
+  GROUP BY order_id, ts_pl
+),
+curr AS (
+  SELECT
+    AVG(order_total)::numeric AS aov_curr,
+    SUM(order_total)::numeric AS rev_curr,
+    COUNT(*)::int AS orders_curr
+  FROM orders_sum
+  WHERE ts_pl >= (SELECT week_start FROM params)
+    AND ts_pl <  (SELECT week_end   FROM params)
+),
+prev AS (
+  SELECT
+    AVG(order_total)::numeric AS aov_prev,
+    SUM(order_total)::numeric AS rev_prev,
+    COUNT(*)::int AS orders_prev
+  FROM orders_sum
+  WHERE ts_pl >= (SELECT prev_start FROM params)
+    AND ts_pl <  (SELECT prev_end   FROM params)
 )
 SELECT
-  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.week_start
-                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.week_end)  AS orders_curr,
-  COUNT(*) FILTER (WHERE (order_ts AT TIME ZONE 'Europe/Warsaw') >= p.prev_start
-                   AND   (order_ts AT TIME ZONE 'Europe/Warsaw') <  p.prev_end)  AS orders_prev
-FROM orders_raw, params p;
+  curr.aov_curr, prev.aov_prev,
+  curr.rev_curr, prev.rev_prev,
+  curr.orders_curr, prev.orders_prev
+FROM curr, prev;
 """
 
 SQL_ORDERS_EBAY_EUR = """
