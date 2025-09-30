@@ -756,6 +756,10 @@ COLS_DISPLAY_BASE = {
     "curr_qty": "Ilość tygodnia (szt.)",
     "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
     "qty_change_pct": "Zmiana ilości %",
+    "avg_price_week": "Śr. cena (tydzień) ({CUR}/szt.)",
+    "avg_price_prev": "Śr. cena (poprz.) ({CUR}/szt.)",
+    "avg_price_delta": "Δ ceny vs poprz. ({CUR}/szt.)",
+    "avg_price_delta_pct": "Δ ceny % vs poprz.",
     "status_rev": "Status (wartość)",
     "status_qty": "Status (ilość)"
 }
@@ -769,6 +773,10 @@ def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
         f"Sprzedaż poprzedniego tygodnia ({cur})",
         "Zmiana sprzedaży %", "Ilość tygodnia (szt.)",
         "Ilość poprzedniego tygodnia (szt.)", "Zmiana ilości %",
+        f"Śr. cena (tydzień) ({cur}/szt.)",
+        f"Śr. cena (poprz.) ({cur}/szt.)",
+        f"Δ ceny vs poprz. ({cur}/szt.)",
+        f"Δ ceny % vs poprz.",
         "Status (wartość)", "Status (ilość)"
     ] if c in out.columns]
     return out[keep]
