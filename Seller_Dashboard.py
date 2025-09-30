@@ -756,10 +756,6 @@ COLS_DISPLAY_BASE = {
     "curr_qty": "Ilość tygodnia (szt.)",
     "prev_qty": "Ilość poprzedniego tygodnia (szt.)",
     "qty_change_pct": "Zmiana ilości %",
-    "avg_price_week": "Śr. cena (tydzień) ({CUR}/szt.)",
-    "avg_price_prev": "Śr. cena (poprz.) ({CUR}/szt.)",
-    "avg_price_delta": "Δ ceny vs poprz. ({CUR}/szt.)",
-    "avg_price_delta_pct": "Δ ceny % vs poprz.",
     "status_rev": "Status (wartość)",
     "status_qty": "Status (ilość)"
 }
@@ -773,10 +769,6 @@ def to_display(df_in: pd.DataFrame, cur: str) -> pd.DataFrame:
         f"Sprzedaż poprzedniego tygodnia ({cur})",
         "Zmiana sprzedaży %", "Ilość tygodnia (szt.)",
         "Ilość poprzedniego tygodnia (szt.)", "Zmiana ilości %",
-        f"Śr. cena (tydzień) ({cur}/szt.)",
-        f"Śr. cena (poprz.) ({cur}/szt.)",
-        f"Δ ceny vs poprz. ({cur}/szt.)",
-        f"Δ ceny % vs poprz.",
         "Status (wartość)", "Status (ilość)"
     ] if c in out.columns]
     return out[keep]
@@ -827,43 +819,11 @@ def render_platform(platform_key: str,
         st.error(f"Brak kolumn w danych: {missing}")
         st.dataframe(df.head(), width="stretch")
         return
-# 👉 ŚREDNIE CENY NA PEŁNYM ZBIORZE (df), potrzebne dla tabel Wzrosty/Spadki
-if all(c in df.columns for c in ["curr_rev","curr_qty","prev_rev","prev_qty"]):
-    df["avg_price_week"] = np.where(df["curr_qty"] > 0, df["curr_rev"] / df["curr_qty"], np.nan)
-    df["avg_price_prev"] = np.where(df["prev_qty"] > 0, df["prev_rev"] / df["prev_qty"], np.nan)
-    df["avg_price_delta"] = df["avg_price_week"] - df["avg_price_prev"]
-    df["avg_price_delta_pct"] = np.where(
-        (df["avg_price_prev"] > 0) & np.isfinite(df["avg_price_prev"]),
-        (df["avg_price_week"] - df["avg_price_prev"]) / df["avg_price_prev"] * 100.0,
-        np.nan
-    )
-    # prezentacyjne zaokrąglenia (bez psucia surowych pól sprzedażowych)
-    for c in ["avg_price_week","avg_price_prev","avg_price_delta"]:
-        df[c] = df[c].round(2)
-    if "avg_price_delta_pct" in df.columns:
-        df["avg_price_delta_pct"] = df["avg_price_delta_pct"].round(1)
-
-
 
     # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
     df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
     df_top["status_qty"], df_top["color_qty"] = zip(*df_top["qty_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_qty)))
-    # Średnie ceny: tydzień, poprzedni, oraz delta i delta %
-    df_top["avg_price_week"] = np.where(df_top["curr_qty"] > 0, df_top["curr_rev"] / df_top["curr_qty"], np.nan)
-    df_top["avg_price_prev"] = np.where(df_top["prev_qty"] > 0, df_top["prev_rev"] / df_top["prev_qty"], np.nan)
-    df_top["avg_price_delta"] = df_top["avg_price_week"] - df_top["avg_price_prev"]
-    df_top["avg_price_delta_pct"] = np.where(
-        (df_top["avg_price_prev"] > 0) & np.isfinite(df_top["avg_price_prev"]),
-        (df_top["avg_price_week"] - df_top["avg_price_prev"]) / df_top["avg_price_prev"] * 100.0,
-        np.nan
-    )
-    # Zaokrąglenia (prezentacja)
-    df_top["avg_price_week"] = df_top["avg_price_week"].round(2)
-    df_top["avg_price_prev"] = df_top["avg_price_prev"].round(2)
-    df_top["avg_price_delta"] = df_top["avg_price_delta"].round(2)
-    df_top["avg_price_delta_pct"] = df_top["avg_price_delta_pct"].round(1)
-
 
     # KPI sumy
     sum_curr = float(df["curr_rev"].sum() or 0)
@@ -1025,55 +985,23 @@ if all(c in df.columns for c in ["curr_rev","curr_qty","prev_rev","prev_qty"]):
             )
             st.plotly_chart(fig_tr, width="stretch")
 
-# Tabele — REALNA skala (pełny df), z limitem i wyborem kolumn
-max_rows = st.sidebar.slider("Limit wierszy w tabelach (Wzrosty/Spadki)", 10, 500, 100, step=10, key=f"max_rows_{platform_key}")
-include_new = st.sidebar.checkbox("Traktuj nowe SKU (prev=0 & curr>0) jako wzrost", value=True, key=f"incl_new_{platform_key}")
+    # Tabele
+    ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
+    downs = df_top[df_top["rev_change_pct"] <= -threshold_rev].copy()
 
-cond_up = (df["rev_change_pct"] >= threshold_rev)
-if include_new:
-    cond_up = cond_up | ((df["prev_rev"].fillna(0) == 0) & (df["curr_rev"].fillna(0) > 0))
-
-ups_all = df[cond_up].copy()
-downs_all = df[df["rev_change_pct"] <= -threshold_rev].copy()
-
-# Sortuj wg aktualnej sprzedaży tygodnia (można zmienić np. na delta, procent itp.)
-ups = ups_all.sort_values("curr_rev", ascending=False).head(max_rows)
-downs = downs_all.sort_values("curr_rev", ascending=False).head(max_rows)
-
-# Wybór kolumn do wyświetlenia (po zmianie nazw na przyjazne)
-st.markdown("### ⚙️ Kolumny do wyświetlenia (dotyczy obu tabel)")
-# Skorzystaj z to_display, by zmapować nazwy, a potem pozwól zawęzić
-tmp_for_cols = to_display(df.head(1) if not df.empty else df, currency_label)
-all_cols_display = list(tmp_for_cols.columns)
-selected_cols = st.multiselect(
-    "Wybierz kolumny",
-    options=all_cols_display,
-    default=all_cols_display,
-    key=f"cols_sel_{platform_key}"
-)
-
-colA, colB = st.columns(2)
-with colA:
-    st.markdown("### 🚀 Wzrosty (≥ próg)")
-    if ups.empty:
-        st.info(f"Brak pozycji przekraczających próg wzrostu. (Na pełnym zbiorze: {len(ups_all):,})")
-    else:
-        st.caption(f"Łącznie spełnia warunek: {len(ups_all):,} • Pokazuję: {min(len(ups_all), max_rows):,}")
-        df_disp = to_display(ups, currency_label)
-        df_disp = df_disp[selected_cols] if selected_cols else df_disp
-        st.dataframe(df_disp, use_container_width=True)
-
-with colB:
-    st.markdown("### 📉 Spadki (≤ -próg)")
-    if downs.empty:
-        st.info(f"Brak pozycji przekraczających próg spadku. (Na pełnym zbiorze: {len(downs_all):,})")
-    else:
-        st.caption(f"Łącznie spełnia warunek: {len(downs_all):,} • Pokazuję: {min(len(downs_all), max_rows):,}")
-        df_disp = to_display(downs, currency_label)
-        df_disp = df_disp[selected_cols] if selected_cols else df_disp
-        st.dataframe(df_disp, use_container_width=True)
-
-
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("### 🚀 Wzrosty (≥ próg)")
+        if ups.empty:
+            st.info("Brak pozycji przekraczających próg wzrostu.")
+        else:
+            st.dataframe(to_display(ups, currency_label), width="stretch")
+    with colB:
+        st.markdown("### 📉 Spadki (≤ -próg)")
+        if downs.empty:
+            st.info("Brak pozycji przekraczających próg spadku.")
+        else:
+            st.dataframe(to_display(downs, currency_label), width="stretch")
 
     with st.expander("🔎 Podgląd TOP (tabela)"):
         st.dataframe(to_display(df_top, currency_label), width="stretch")
