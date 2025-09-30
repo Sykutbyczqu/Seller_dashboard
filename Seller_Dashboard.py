@@ -820,6 +820,22 @@ def render_platform(platform_key: str,
         st.dataframe(df.head(), width="stretch")
         return
 
+    # 👉 ŚREDNIE CENY NA PEŁNYM ZBIORZE (df) – potrzebne dla tabel Wzrosty/Spadki
+    if {"curr_rev","curr_qty","prev_rev","prev_qty"}.issubset(df.columns):
+        df["avg_price_week"] = np.where(df["curr_qty"] > 0, df["curr_rev"] / df["curr_qty"], np.nan)
+        df["avg_price_prev"] = np.where(df["prev_qty"] > 0, df["prev_rev"] / df["prev_qty"], np.nan)
+        df["avg_price_delta"] = df["avg_price_week"] - df["avg_price_prev"]
+        df["avg_price_delta_pct"] = np.where(
+            (df["avg_price_prev"] > 0) & np.isfinite(df["avg_price_prev"]),
+            (df["avg_price_week"] - df["avg_price_prev"]) / df["avg_price_prev"] * 100.0,
+            np.nan
+        )
+        # Zaokrąglenia do prezentacji
+        df["avg_price_week"] = df["avg_price_week"].round(2)
+        df["avg_price_prev"] = df["avg_price_prev"].round(2)
+        df["avg_price_delta"] = df["avg_price_delta"].round(2)
+        df["avg_price_delta_pct"] = df["avg_price_delta_pct"].round(1)
+
     # TOP N
     df_top = df.sort_values("curr_rev", ascending=False).head(top_n).copy()
     df_top["status_rev"], df_top["color_rev"] = zip(*df_top["rev_change_pct"].apply(lambda x: classify_change_symbol(x, threshold_rev)))
@@ -969,21 +985,44 @@ def render_platform(platform_key: str,
                             stackgroup="one", customdata=custom, hovertemplate=hovertemplate
                         )
                     )
-                else:
-                    fig_tr.add_trace(
-                        go.Scatter(
-                            x=pv_rev.index, y=y, name=sku, mode="lines+markers",
-                            customdata=custom, hovertemplate=hovertemplate
-                        )
-                    )
+    # Tabele — REALNA skala (pełny df), z limitem i wyborem kolumn
+    max_rows = st.sidebar.slider("Limit wierszy w tabelach (Wzrosty/Spadki)", 10, 500, 100, step=10, key=f"max_rows_{platform_key}")
+    include_new = st.sidebar.checkbox("Traktuj nowe SKU (prev=0 & curr>0) jako wzrost", value=True, key=f"incl_new_{platform_key}")
 
-            fig_tr.update_layout(
-                xaxis=dict(tickformat="%Y-%m-%d"),
-                yaxis_title=f"Sprzedaż ({currency_label})",
-                height=520,
-                hovermode="x unified"
-            )
-            st.plotly_chart(fig_tr, width="stretch")
+    cond_up = (df["rev_change_pct"] >= threshold_rev)
+    if include_new:
+        cond_up = cond_up | ((df["prev_rev"].fillna(0) == 0) & (df["curr_rev"].fillna(0) > 0))
+
+    ups_all = df[cond_up].copy()
+    downs_all = df[df["rev_change_pct"] <= -threshold_rev].copy()
+
+    # Sortowanie wg sprzedaży tygodnia
+    ups = ups_all.sort_values("curr_rev", ascending=False).head(max_rows)
+    downs = downs_all.sort_values("curr_rev", ascending=False).head(max_rows)
+
+    # Wybór kolumn – w Sidebar (po mapowaniu nazw)
+    tmp_for_cols = to_display(df.head(1) if not df.empty else df, currency_label)
+    available_cols = list(tmp_for_cols.columns)
+    selected_cols = st.sidebar.multiselect("Kolumny w tabelach (Wzrosty/Spadki)", options=available_cols, default=available_cols, key=f"cols_sel_{platform_key}")
+    if not selected_cols:
+        selected_cols = available_cols
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("### 🚀 Wzrosty (≥ próg)")
+        if ups.empty:
+            st.info(f"Brak pozycji przekraczających próg wzrostu. (Na pełnym zbiorze: {len(ups_all):,})")
+        else:
+            st.caption(f"Łącznie spełnia warunek: {len(ups_all):,} • Pokazuję: {min(len(ups_all), max_rows):,}")
+            st.dataframe(to_display(ups, currency_label)[selected_cols], width="stretch")
+
+    with colB:
+        st.markdown("### 📉 Spadki (≤ -próg)")
+        if downs.empty:
+            st.info(f"Brak pozycji przekraczających próg spadku. (Na pełnym zbiorze: {len(downs_all):,})")
+        else:
+            st.caption(f"Łącznie spełnia warunek: {len(downs_all):,} • Pokazuję: {min(len(downs_all), max_rows):,}")
+            st.dataframe(to_display(downs, currency_label)[selected_cols], width='stretch')
 
     # Tabele
     ups = df_top[df_top["rev_change_pct"] >= threshold_rev].copy()
