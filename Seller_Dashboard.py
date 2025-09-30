@@ -1374,7 +1374,7 @@ def render_platform(platform_key: str,
                                 title=f"TOP{top_n} - raport tygodniowy - {platform_key}")
     d3.download_button(f"📥 Pobierz (PDF) — TOP — {platform_key}", pdf_bytes,
                        f"sprzedaz_top_{platform_key}.pdf", "application/pdf")
-    d4 = st.columns(1)[0]
+
     if st.button(f"📊 Generuj Raport Kadrowy (PDF) - {platform_key}"):
         with st.spinner("Generowanie raportu..."):
             pdf_executive = generate_executive_pdf_report(
